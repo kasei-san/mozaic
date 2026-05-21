@@ -8,7 +8,7 @@
 run.bat
 ```
 
-Python は `E:\llm\prompt-mixer\venv\Scripts\python.exe` を使用（Pillow・numpy 入り）。
+Python は Pillow・numpy 入りの環境を使用。
 
 ## ディレクトリ構成
 
