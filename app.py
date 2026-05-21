@@ -89,7 +89,7 @@ class MosaicApp:
         tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=14)
 
         self.tool_buttons = {}
-        for label, tool in [("消しゴム", "eraser"), ("魔法の杖", "wand")]:
+        for label, tool in [("ブラシ", "brush"), ("消しゴム", "eraser"), ("魔法の杖", "wand")]:
             btn = tk.Button(
                 ctrl, text=label,
                 command=lambda t=tool: self._set_tool(t),
