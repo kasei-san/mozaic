@@ -4,18 +4,15 @@
 
 ## 必要環境
 
-- Windows
-- Python 3.10（Pillow・numpy 入り venv）
+- Python 3.10+
+- Pillow
+- numpy
 
-デフォルトでは `E:\llm\prompt-mixer\venv\Scripts\python.exe` を使用。変更する場合は `run.bat` を編集してください。
+```
+pip install pillow numpy
+```
 
 ## 起動
-
-```
-run.bat
-```
-
-または直接：
 
 ```
 python app.py
