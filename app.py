@@ -4,17 +4,33 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import numpy as np
 from collections import deque
 import os
+import json
 
 INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 MOSAIC_BLOCK_RATIO = 100
 MOSAIC_BLOCK_MIN = 4
 BRUSH_SIZES = [10, 20, 30, 50, 80]
-WAND_TOLERANCE = 50
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
+
+_DEFAULT_SETTINGS = {
+    "wand_tolerance": 25,
+    "wand_dilate_scale": 25,
+}
+
+def _load_settings():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {**_DEFAULT_SETTINGS, **data}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(_DEFAULT_SETTINGS)
+
+SETTINGS = _load_settings()
 
 
 class MosaicApp:
@@ -49,6 +65,9 @@ class MosaicApp:
         self._pan_offset_start = (0, 0)
         self._cursor_pos = None
         self._drawing = False  # ブラシドラッグ中
+
+        self.wand_tolerance = SETTINGS["wand_tolerance"]
+        self.wand_dilate_scale = SETTINGS["wand_dilate_scale"]
 
         # Undo: マスクのスナップショットスタック
         self.undo_stack = []
@@ -86,7 +105,7 @@ class MosaicApp:
         tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=14)
 
         self.tool_buttons = {}
-        for label, tool in [("消しゴム", "eraser"), ("魔法の杖", "wand")]:
+        for label, tool in [("ブラシ", "brush"), ("消しゴム", "eraser"), ("魔法の杖", "wand")]:
             btn = tk.Button(
                 ctrl, text=label,
                 command=lambda t=tool: self._set_tool(t),
@@ -95,6 +114,29 @@ class MosaicApp:
             )
             btn.pack(fill=tk.X, padx=12, pady=4)
             self.tool_buttons[tool] = btn
+
+        tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=(10, 4))
+        tk.Label(ctrl, text="色差 tolerance", bg="#2b2b2b", fg="#aaaaaa",
+                 font=("", 9)).pack(anchor=tk.W, padx=12)
+        self.tolerance_var = tk.IntVar(value=self.wand_tolerance)
+        tk.Scale(
+            ctrl, from_=1, to=100, orient=tk.HORIZONTAL,
+            variable=self.tolerance_var,
+            command=lambda v: setattr(self, "wand_tolerance", int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
+
+        tk.Label(ctrl, text="境界膨張", bg="#2b2b2b", fg="#aaaaaa",
+                 font=("", 9)).pack(anchor=tk.W, padx=12, pady=(6, 0))
+        self.dilate_var = tk.IntVar(value=self.wand_dilate_scale)
+        tk.Scale(
+            ctrl, from_=0, to=200, orient=tk.HORIZONTAL,
+            variable=self.dilate_var,
+            command=lambda v: setattr(self, "wand_dilate_scale", int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
 
         tk.Button(
             ctrl, text="Undo  (Ctrl+Z)", command=self._undo,
@@ -132,6 +174,8 @@ class MosaicApp:
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.root.bind("<Control-z>", lambda e: self._undo())
         self.root.bind("<Control-Z>", lambda e: self._undo())
+
+        self._set_tool("brush")
 
     # ── ツール選択 ────────────────────────────────────────────
 
@@ -243,7 +287,7 @@ class MosaicApp:
 
         # クリック点と色差が tolerance 以内のピクセルマスク
         diff = np.abs(img_arr.astype(np.int32) - target).max(axis=2)
-        similar = diff <= WAND_TOLERANCE
+        similar = diff <= self.wand_tolerance
 
         # BFS で連結成分を取得
         visited = np.zeros((ih, iw), dtype=bool)
@@ -265,13 +309,16 @@ class MosaicApp:
             return
 
         # BFS 結果を一時マスクに書いて dilate → 境界線を飲み込む
-        dilate_px = max(1, iw // 100)
-        kernel = dilate_px * 2 + 1
+        dilate_px = int(iw // 100 * self.wand_dilate_scale / 100)
         region_mask = np.zeros((ih, iw), dtype=np.uint8)
         region_mask[ys, xs] = 255
-        dilated = Image.fromarray(region_mask, mode='L').filter(
-            ImageFilter.MaxFilter(kernel)
-        )
+        if dilate_px > 0:
+            kernel = dilate_px * 2 + 1
+            dilated = Image.fromarray(region_mask, mode='L').filter(
+                ImageFilter.MaxFilter(kernel)
+            )
+        else:
+            dilated = Image.fromarray(region_mask, mode='L')
 
         mask_arr = np.array(self.mask_image)
         mask_arr = np.maximum(mask_arr, np.array(dilated))
