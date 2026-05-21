@@ -50,6 +50,9 @@ class MosaicApp:
         self._cursor_pos = None
         self._drawing = False  # ブラシドラッグ中
 
+        self.wand_tolerance = WAND_TOLERANCE
+        self.wand_dilate_scale = 100  # 100 = iw//100、0 = 膨張なし
+
         # Undo: マスクのスナップショットスタック
         self.undo_stack = []
 
@@ -95,6 +98,29 @@ class MosaicApp:
             )
             btn.pack(fill=tk.X, padx=12, pady=4)
             self.tool_buttons[tool] = btn
+
+        tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=(10, 4))
+        tk.Label(ctrl, text="色差 tolerance", bg="#2b2b2b", fg="#aaaaaa",
+                 font=("", 9)).pack(anchor=tk.W, padx=12)
+        self.tolerance_var = tk.IntVar(value=self.wand_tolerance)
+        tk.Scale(
+            ctrl, from_=1, to=100, orient=tk.HORIZONTAL,
+            variable=self.tolerance_var,
+            command=lambda v: setattr(self, "wand_tolerance", int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
+
+        tk.Label(ctrl, text="境界膨張", bg="#2b2b2b", fg="#aaaaaa",
+                 font=("", 9)).pack(anchor=tk.W, padx=12, pady=(6, 0))
+        self.dilate_var = tk.IntVar(value=self.wand_dilate_scale)
+        tk.Scale(
+            ctrl, from_=0, to=200, orient=tk.HORIZONTAL,
+            variable=self.dilate_var,
+            command=lambda v: setattr(self, "wand_dilate_scale", int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
 
         tk.Button(
             ctrl, text="Undo  (Ctrl+Z)", command=self._undo,
@@ -243,7 +269,7 @@ class MosaicApp:
 
         # クリック点と色差が tolerance 以内のピクセルマスク
         diff = np.abs(img_arr.astype(np.int32) - target).max(axis=2)
-        similar = diff <= WAND_TOLERANCE
+        similar = diff <= self.wand_tolerance
 
         # BFS で連結成分を取得
         visited = np.zeros((ih, iw), dtype=bool)
@@ -265,13 +291,16 @@ class MosaicApp:
             return
 
         # BFS 結果を一時マスクに書いて dilate → 境界線を飲み込む
-        dilate_px = max(1, iw // 100)
-        kernel = dilate_px * 2 + 1
+        dilate_px = int(iw // 100 * self.wand_dilate_scale / 100)
         region_mask = np.zeros((ih, iw), dtype=np.uint8)
         region_mask[ys, xs] = 255
-        dilated = Image.fromarray(region_mask, mode='L').filter(
-            ImageFilter.MaxFilter(kernel)
-        )
+        if dilate_px > 0:
+            kernel = dilate_px * 2 + 1
+            dilated = Image.fromarray(region_mask, mode='L').filter(
+                ImageFilter.MaxFilter(kernel)
+            )
+        else:
+            dilated = Image.fromarray(region_mask, mode='L')
 
         mask_arr = np.array(self.mask_image)
         mask_arr = np.maximum(mask_arr, np.array(dilated))
