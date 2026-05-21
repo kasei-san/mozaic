@@ -15,7 +15,7 @@ pip install pillow numpy
 ## 起動
 
 ```
-python app.py
+run.bat
 ```
 
 ## 使い方
