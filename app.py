@@ -159,6 +159,8 @@ class MosaicApp:
         self.root.bind("<Control-z>", lambda e: self._undo())
         self.root.bind("<Control-Z>", lambda e: self._undo())
 
+        self._set_tool("brush")
+
     # ── ツール選択 ────────────────────────────────────────────
 
     def _set_brush(self, size):
