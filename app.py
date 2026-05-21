@@ -4,17 +4,33 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import numpy as np
 from collections import deque
 import os
+import json
 
 INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 MOSAIC_BLOCK_RATIO = 100
 MOSAIC_BLOCK_MIN = 4
 BRUSH_SIZES = [10, 20, 30, 50, 80]
-WAND_TOLERANCE = 50
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
+
+_DEFAULT_SETTINGS = {
+    "wand_tolerance": 25,
+    "wand_dilate_scale": 25,
+}
+
+def _load_settings():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {**_DEFAULT_SETTINGS, **data}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(_DEFAULT_SETTINGS)
+
+SETTINGS = _load_settings()
 
 
 class MosaicApp:
@@ -50,8 +66,8 @@ class MosaicApp:
         self._cursor_pos = None
         self._drawing = False  # ブラシドラッグ中
 
-        self.wand_tolerance = WAND_TOLERANCE
-        self.wand_dilate_scale = 100  # 100 = iw//100、0 = 膨張なし
+        self.wand_tolerance = SETTINGS["wand_tolerance"]
+        self.wand_dilate_scale = SETTINGS["wand_dilate_scale"]
 
         # Undo: マスクのスナップショットスタック
         self.undo_stack = []
