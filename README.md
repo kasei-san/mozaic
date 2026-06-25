@@ -2,15 +2,15 @@
 
 手動モザイク処理ツール。`input/` フォルダの画像を名前順に1枚ずつ表示し、ブラシ・消しゴム・魔法の杖でモザイク領域を指定して `output/` に保存する。
 
-## 必要環境
+## セットアップ（初回のみ）
 
-- Python 3.10+
-- Pillow
-- numpy
+Python 3.10 が必要なのだ。
 
 ```
-pip install pillow numpy
+setup.bat
 ```
+
+`venv/` を作成して Pillow・numpy を自動インストールするのだ。
 
 ## 起動
 
@@ -51,9 +51,10 @@ run.bat
 
 ```
 mosaic/
-├── app.py          # メインアプリ
-├── run.bat         # 起動スクリプト
+├── app.py           # メインアプリ
+├── run.bat          # 起動スクリプト
+├── setup.bat        # 初回セットアップ（venv 作成・パッケージインストール）
 ├── requirements.txt
-├── input/          # 処理対象画像を置く（git 管理外）
-└── output/         # 保存先（git 管理外）
+├── input/           # 処理対象画像を置く（git 管理外）
+└── output/          # 保存先（git 管理外）
 ```
