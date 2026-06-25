@@ -10,7 +10,9 @@
       "Bash(git commit *)",
       "Bash(git -C E:/llm status)",
       "Bash(git -C E:/llm diff)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)"
     ]
   }
 }
