@@ -347,7 +347,8 @@ class MosaicApp:
         else:
             self.canvas.itemconfig(self._img_item, image=self.tk_image)
             self.canvas.coords(self._img_item, self.offset_x, self.offset_y)
-            self.canvas.tag_lower("img", "cursor")
+            if self.canvas.find_withtag("cursor"):
+                self.canvas.tag_lower("img", "cursor")
         self._redraw_cursor()
 
     # ── カーソル ─────────────────────────────────────────────
