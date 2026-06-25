@@ -1,4 +1,4 @@
 @echo off
 cd /d %~dp0
-py -3.10 app.py
+venv\Scripts\python app.py
 pause
