@@ -1,0 +1,6 @@
+# .bat は checkout 時に必ず CRLF にする。
+# cmd.exe の goto はバイトオフセットでシークするため、LF のみだと
+# 位置によって飛び先がズレうる。core.autocrlf の設定は各自の環境依存
+# なので、リポジトリ側で明示して全クローンで揃える。
+# 詳細は CLAUDE.md の「.bat の記述ルール」を参照。
+*.bat text eol=crlf
