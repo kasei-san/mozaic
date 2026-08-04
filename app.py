@@ -20,6 +20,8 @@ ZOOM_MAX = 20.0
 _DEFAULT_SETTINGS = {
     "wand_tolerance": 25,
     "wand_dilate_scale": 25,
+    "line_threshold": 80,
+    "line_dilate_scale": 25,
 }
 
 def _load_settings():
@@ -46,7 +48,7 @@ class MosaicApp:
         self.images = [os.path.join(INPUT_DIR, f) for f in files]
         self.current_index = 0
 
-        # tool: "brush" | "eraser" | "wand"
+        # tool: "brush" | "eraser" | "wand" | "line"
         self.tool = "brush"
         self.brush_size = 30
 
@@ -68,6 +70,8 @@ class MosaicApp:
 
         self.wand_tolerance = SETTINGS["wand_tolerance"]
         self.wand_dilate_scale = SETTINGS["wand_dilate_scale"]
+        self.line_threshold = SETTINGS["line_threshold"]
+        self.line_dilate_scale = SETTINGS["line_dilate_scale"]
 
         # Undo: マスクのスナップショットスタック
         self.undo_stack = []
@@ -105,7 +109,8 @@ class MosaicApp:
         tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=14)
 
         self.tool_buttons = {}
-        for label, tool in [("ブラシ", "brush"), ("消しゴム", "eraser"), ("魔法の杖", "wand")]:
+        for label, tool in [("ブラシ", "brush"), ("消しゴム", "eraser"),
+                            ("魔法の杖", "wand"), ("黒線ブラシ", "line")]:
             btn = tk.Button(
                 ctrl, text=label,
                 command=lambda t=tool: self._set_tool(t),
@@ -137,6 +142,33 @@ class MosaicApp:
             bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
             troughcolor="#444", activebackground="#777", length=136,
         ).pack(padx=12)
+
+        tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=(10, 4))
+        tk.Label(ctrl, text="黒線ブラシ設定", bg="#2b2b2b", fg="#cccccc",
+                 font=("", 9, "bold")).pack(anchor=tk.W, padx=12)
+        tk.Label(ctrl, text="輝度しきい値", bg="#2b2b2b", fg="#aaaaaa",
+                 font=("", 9)).pack(anchor=tk.W, padx=12, pady=(4, 0))
+        self.line_threshold_var = tk.IntVar(value=self.line_threshold)
+        tk.Scale(
+            ctrl, from_=0, to=255, orient=tk.HORIZONTAL,
+            variable=self.line_threshold_var,
+            command=lambda v: setattr(self, "line_threshold", int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
+
+        tk.Label(ctrl, text="膨張", bg="#2b2b2b", fg="#aaaaaa",
+                 font=("", 9)).pack(anchor=tk.W, padx=12, pady=(6, 0))
+        self.line_dilate_var = tk.IntVar(value=self.line_dilate_scale)
+        tk.Scale(
+            ctrl, from_=0, to=200, orient=tk.HORIZONTAL,
+            variable=self.line_dilate_var,
+            command=lambda v: setattr(self, "line_dilate_scale", int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
+
+        tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=(10, 4))
 
         tk.Button(
             ctrl, text="Undo  (Ctrl+Z)", command=self._undo,
@@ -329,6 +361,41 @@ class MosaicApp:
         y1, y2 = max(0, min(ys) - pad), min(ih, max(ys) + pad + 1)
         self._apply_mask_region(x1, y1, x2, y2)
 
+    def _paint_line(self, ix, iy, radius):
+        """ブラシ円内の暗い（黒線）ピクセルだけを mask=255 にする"""
+        iw, ih = self.original_image.size
+        # 膨張分だけ bbox を広げて、膨張が切れないようにする
+        dilate_px = int(iw // 100 * self.line_dilate_scale / 100)
+        pad = dilate_px + 1
+        x1 = max(0, int(ix - radius) - pad)
+        y1 = max(0, int(iy - radius) - pad)
+        x2 = min(iw, int(ix + radius) + pad + 1)
+        y2 = min(ih, int(iy + radius) + pad + 1)
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        # bbox 内の円形ブラシ形状
+        yy, xx = np.ogrid[y1:y2, x1:x2]
+        circle = (xx - ix) ** 2 + (yy - iy) ** 2 <= radius ** 2
+
+        # 輝度で黒線を判定（しきい値以下を黒線とみなす）
+        crop = np.array(self.original_image.crop((x1, y1, x2, y2))).astype(np.int32)
+        lum = (crop[:, :, 0] * 299 + crop[:, :, 1] * 587 + crop[:, :, 2] * 114) // 1000
+        dark = (lum <= self.line_threshold) & circle
+
+        region = np.where(dark, 255, 0).astype(np.uint8)
+        if dilate_px > 0:
+            kernel = dilate_px * 2 + 1
+            region = np.array(
+                Image.fromarray(region, mode="L").filter(ImageFilter.MaxFilter(kernel))
+            )
+
+        # bbox のみ読み書きしてマスクへ合成
+        sub = np.array(self.mask_image.crop((x1, y1, x2, y2)))
+        merged = np.maximum(sub, region).astype(np.uint8)
+        self.mask_image.paste(Image.fromarray(merged, mode="L"), (x1, y1))
+        self._apply_mask_region(x1, y1, x2, y2)
+
     # ── 表示 ─────────────────────────────────────────────────
 
     def _refresh_canvas(self):
@@ -368,7 +435,7 @@ class MosaicApp:
                                         fill=color, width=1, tags="cursor")
         else:
             r = self.brush_size
-            color = "#ff6666" if self.tool == "eraser" else "#ffffff"
+            color = {"eraser": "#ff6666", "line": "#44ddff"}.get(self.tool, "#ffffff")
             self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
                                     outline="#000000", width=3, tags="cursor")
             self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
@@ -446,7 +513,10 @@ class MosaicApp:
     def _apply_point(self, cx, cy):
         ix, iy = self._canvas_to_image(cx, cy)
         radius = self.brush_size / self.scale
-        self._paint_brush(ix, iy, radius, erase=(self.tool == "eraser"))
+        if self.tool == "line":
+            self._paint_line(ix, iy, radius)
+        else:
+            self._paint_brush(ix, iy, radius, erase=(self.tool == "eraser"))
         self._refresh_canvas()
 
     # ── 完了 ─────────────────────────────────────────────────
