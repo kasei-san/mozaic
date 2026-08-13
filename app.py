@@ -3,8 +3,12 @@ from tkinter import messagebox
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import numpy as np
 from collections import deque
+import io
 import os
 import json
+import queue
+import shutil
+import threading
 
 INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -14,8 +18,14 @@ MOSAIC_BLOCK_RATIO = 100
 MOSAIC_BLOCK_MIN = 4
 # 高さは全ウィジェットが収まる実測値（長いファイル名でステータスが折り返した状態で 841）
 # に余裕を持たせた値。足りなくなると Undo ボタンから先に隠れる
-WINDOW_W, WINDOW_H = 1280, 880
+# 幅は左のコントロール 160 + 右のサムネイル一覧 + 編集領域
+WINDOW_W, WINDOW_H = 1440, 880
 WINDOW_SCREEN_MARGIN_W, WINDOW_SCREEN_MARGIN_H = 80, 100
+THUMB_W = 116           # サムネイルの最大辺
+THUMB_CELL_H = 128      # 一覧1セルの高さ（サムネイルの縦横比によらず固定）
+THUMB_PANEL_W = 150     # スクロールバーを含む右パネルの幅
+JPEG_QUALITY = 95
+SAVE_DELAY_MS = 400     # 連続ストロークをまとめる待ち時間
 BRUSH_SIZE_MIN, BRUSH_SIZE_MAX = 10, 50
 BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
@@ -60,11 +70,16 @@ class MosaicApp:
         self.root.geometry(f"{win_w}x{win_h}")
         self.root.configure(bg="#1e1e1e")
 
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-        files = sorted(f for f in os.listdir(INPUT_DIR) if f.lower().endswith(IMAGE_EXTS))
-        self.images = [os.path.join(INPUT_DIR, f) for f in files]
+        # entries: [(ファイル名, 元画像のパス), ...]。実体は _build_entries を見ること
+        self.entries = []
         self.current_index = 0
+        # ファイル名 -> PNG 圧縮したマスク。素の L 画像だと 1024x1024 で 1MB/枚 だが、
+        # 2値のベタ塗りなので PNG にすると 6KB 程度に落ちる（実測 約180分の1）
+        self.masks = {}
+        # このセッションで一度でも書き戻したファイル。Undo でマスクが空に戻ったとき、
+        # 塗る前の状態を output へ書き戻す必要があるかの判定に使う
+        self.saved = set()
+        self.copy_errors = []
 
         # tool: "brush" | "eraser" | "wand" | "line"
         self.tool = "brush"
@@ -93,17 +108,36 @@ class MosaicApp:
         self.line_threshold = SETTINGS["line_threshold"]
         self.line_dilate_scale = SETTINGS["line_dilate_scale"]
 
-        # Undo: マスクのスナップショットスタック
+        # Undo: マスクのスナップショットスタック。現在の画像の分だけ持つ
         self.undo_stack = []
 
+        # サムネイル一覧の描画物（GC されないよう PhotoImage を保持する）
+        self.thumb_photos = {}
+        self.thumb_items = {}
+        self.thumb_marks = {}
+        self.thumb_sel = None
+        self._thumb_queue = queue.Queue()
+        self._thumb_done = False
+        self._save_after_id = None
+
+        self._build_entries()
         self._setup_ui()
 
-        if not self.images:
+        if not self.entries:
             messagebox.showwarning("警告", "input フォルダに画像がないのだ")
             root.destroy()
             return
+        if self.copy_errors:
+            messagebox.showwarning(
+                "警告",
+                "output にコピーできなかった画像があるのだ:\n\n"
+                + "\n".join(self.copy_errors[:10])
+                + ("\n..." if len(self.copy_errors) > 10 else ""),
+            )
 
-        self.load_image()
+        self._build_thumb_cells()
+        self._select_index(0)
+        self._start_thumb_loader()
 
     # ── UI構築 ──────────────────────────────────────────────
 
@@ -112,20 +146,16 @@ class MosaicApp:
         ctrl.pack(side=tk.LEFT, fill=tk.Y)
         ctrl.pack_propagate(False)
 
-        # 完了ボタンとステータスは下端固定。pack は宣言順に領域を切り出すので、
-        # ウィンドウが低いときでも確実に表示されるよう他より先に pack する
+        # ステータスは下端固定。pack は宣言順に領域を切り出すので、ウィンドウが低いときでも
+        # 確実に表示されるよう他より先に pack する
         # （side=BOTTOM を指定しても、後から pack すると領域が残っておらず消える）
         self.status_var = tk.StringVar()
         tk.Label(ctrl, textvariable=self.status_var,
                  bg="#2b2b2b", fg="#888888",
                  wraplength=148, justify=tk.CENTER).pack(side=tk.BOTTOM, pady=16, padx=6)
 
-        tk.Button(
-            ctrl, text="完了 →", command=self._complete,
-            bg="#3a9f6e", fg="white", relief=tk.FLAT,
-            activebackground="#4ec98a", bd=0,
-            font=("", 12, "bold"), pady=10,
-        ).pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=4)
+        tk.Label(ctrl, text="← →  で画像を移動\n塗ると自動保存", bg="#2b2b2b", fg="#666666",
+                 font=("", 8), justify=tk.CENTER).pack(side=tk.BOTTOM, pady=(0, 4))
 
         tk.Frame(ctrl, height=1, bg="#444").pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=14)
 
@@ -228,6 +258,22 @@ class MosaicApp:
             activebackground="#777", bd=0, padx=8, pady=6,
         ).pack(fill=tk.X, padx=12, pady=4)
 
+        # 右のサムネイル一覧。canvas より先に pack して右端を確保する
+        side = tk.Frame(self.root, width=THUMB_PANEL_W, bg="#252525")
+        side.pack(side=tk.RIGHT, fill=tk.Y)
+        side.pack_propagate(False)
+
+        self.thumb_canvas = tk.Canvas(side, bg="#252525", highlightthickness=0)
+        thumb_sb = tk.Scrollbar(side, orient=tk.VERTICAL,
+                                command=self.thumb_canvas.yview,
+                                troughcolor="#252525", bg="#555", bd=0,
+                                highlightthickness=0, takefocus=0)
+        self.thumb_canvas.configure(yscrollcommand=thumb_sb.set)
+        thumb_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.thumb_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.thumb_canvas.bind("<Button-1>", self._on_thumb_click)
+        self.thumb_canvas.bind("<MouseWheel>", self._on_thumb_scroll)
+
         self.canvas = tk.Canvas(self.root, bg="#111111", cursor="none",
                                 highlightthickness=0)
         self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -244,8 +290,22 @@ class MosaicApp:
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.root.bind("<Control-z>", lambda e: self._undo())
         self.root.bind("<Control-Z>", lambda e: self._undo())
+        self.root.bind("<Left>", self._on_key_prev)
+        self.root.bind("<Right>", self._on_key_next)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Scale はフォーカスがあると左右キーで値が動いてしまう。ウィジェット単位の
+        # バインディングはクラスバインディングより先に走るので、そこで break して潰す
+        for w in self._descendants(ctrl):
+            w.bind("<Left>", self._on_key_prev)
+            w.bind("<Right>", self._on_key_next)
 
         self._set_tool("brush")
+
+    def _descendants(self, widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from self._descendants(child)
 
     # ── ツール選択 ────────────────────────────────────────────
 
@@ -270,24 +330,78 @@ class MosaicApp:
 
     # ── 画像管理 ──────────────────────────────────────────────
 
-    def load_image(self):
-        while self.current_index < len(self.images):
-            fname = os.path.basename(self.images[self.current_index])
-            if not os.path.exists(os.path.join(OUTPUT_DIR, fname)):
-                break
-            self.current_index += 1
+    def _build_entries(self):
+        """input の未コピー分を output へ複製し、output の画像一覧を作る
 
-        if self.current_index >= len(self.images):
-            messagebox.showinfo("完了", "全ての画像を処理したのだ！")
-            self.root.destroy()
+        コピーは shutil.copy2（バイナリ）で行う。Pillow で開いて保存し直すと
+        JPEG が再エンコードされて、一度も編集していない画像まで劣化するため。
+        """
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+        if os.path.isdir(INPUT_DIR):
+            for name in sorted(os.listdir(INPUT_DIR)):
+                if not name.lower().endswith(IMAGE_EXTS):
+                    continue
+                dst = os.path.join(OUTPUT_DIR, name)
+                if os.path.exists(dst):
+                    continue  # 既存の作業結果は上書きしない
+                try:
+                    shutil.copy2(os.path.join(INPUT_DIR, name), dst)
+                except OSError as e:
+                    self.copy_errors.append(f"{name}: {e.strerror or e}")
+
+        names = sorted(f for f in os.listdir(OUTPUT_DIR)
+                       if f.lower().endswith(IMAGE_EXTS))
+        # 元画像は input にあればそちら。無ければ output のファイル自体が元になる
+        # （過去のセッションで焼き込んだモザイクは剥がせない）
+        self.entries = []
+        for name in names:
+            src = os.path.join(INPUT_DIR, name)
+            self.entries.append(
+                (name, src if os.path.exists(src) else os.path.join(OUTPUT_DIR, name))
+            )
+
+    def _select_index(self, index):
+        """指定の画像へ切り替える。現在のマスクは保持し、必要なら保存する"""
+        if not self.entries:
             return
+        index = max(0, min(index, len(self.entries) - 1))
+        if self.original_image is not None:
+            # 保留中の保存は待たずにここで確定させる
+            self._cancel_pending_save()
+            self._save_current()
+            self._store_mask()
+        self.current_index = index
+        self._load_current()
+        self._update_thumb_selection()
+        self._scroll_to_current()
 
-        path = self.images[self.current_index]
-        self.original_image = Image.open(path).convert("RGB")
+    def _load_current(self):
+        name, src = self.entries[self.current_index]
+        try:
+            self.original_image = Image.open(src).convert("RGB")
+        except OSError as e:
+            messagebox.showwarning("警告", f"{name} を開けなかったのだ:\n{e}")
+            self.original_image = None
+            self.composite_image = None
+            self.mask_image = None
+            self.canvas.delete("img")
+            self._img_item = None
+            self.status_var.set(f"{name} を開けなかったのだ")
+            return
         iw, ih = self.original_image.size
-        self.mask_image = Image.new("L", (iw, ih), 0)
+
+        stored = self.masks.get(name)
+        if stored is not None:
+            mask = Image.open(io.BytesIO(stored)).convert("L")
+            # 元画像が差し替わっていた場合に備えてサイズを確認する
+            self.mask_image = mask if mask.size == (iw, ih) else Image.new("L", (iw, ih), 0)
+        else:
+            self.mask_image = Image.new("L", (iw, ih), 0)
+
         self.undo_stack = []
         self._img_item = None
+        self.canvas.delete("img")
 
         block = max(MOSAIC_BLOCK_MIN, iw // MOSAIC_BLOCK_RATIO)
         bw, bh = max(1, iw // block), max(1, ih // block)
@@ -295,13 +409,86 @@ class MosaicApp:
             self.original_image.resize((bw, bh), Image.BOX).resize((iw, ih), Image.NEAREST)
         )
 
-        fname = os.path.basename(path)
-        self.status_var.set(f"{self.current_index + 1} / {len(self.images)}\n\n{fname}")
-        self.root.title(f"Mosaic Tool  [{self.current_index + 1}/{len(self.images)}]  {fname}")
+        self.status_var.set(f"{self.current_index + 1} / {len(self.entries)}\n\n{name}")
+        self.root.title(
+            f"Mosaic Tool  [{self.current_index + 1}/{len(self.entries)}]  {name}"
+        )
 
         self._fit_image()
         self._rebuild_composite()
         self._refresh_canvas()
+
+    def _store_mask(self):
+        """現在のマスクを PNG に圧縮して保持する。一度も塗っていなければ捨てる"""
+        if self.mask_image is None:
+            return
+        name = self.entries[self.current_index][0]
+        if self.mask_image.getbbox() is None:
+            self.masks.pop(name, None)
+            return
+        buf = io.BytesIO()
+        self.mask_image.save(buf, format="PNG")
+        self.masks[name] = buf.getvalue()
+
+    def _save_current(self):
+        """output のファイルを更新する。一度も塗っていない画像は触らない
+
+        起動時にコピーした状態のままなので、書き戻すと JPEG が無駄に劣化する。
+        """
+        if self.composite_image is None or self.mask_image is None:
+            return
+        name = self.entries[self.current_index][0]
+        # まだ塗られていない画像は起動時のコピーのままなので触らない。ただし一度保存した
+        # 後に Undo で全消しした場合は、塗る前の状態を書き戻す必要がある
+        if self.mask_image.getbbox() is None and name not in self.saved:
+            return
+        path = os.path.join(OUTPUT_DIR, name)
+        try:
+            if os.path.splitext(name)[1].lower() in (".jpg", ".jpeg"):
+                self.composite_image.save(path, quality=JPEG_QUALITY)
+            else:
+                self.composite_image.save(path)
+            self.saved.add(name)
+        except OSError as e:
+            self.status_var.set(f"保存できなかったのだ\n{name}\n{e.strerror or e}")
+
+    def _flush_current(self):
+        """1操作終わるごとに output を更新し、一覧の印も更新する
+
+        保存は少し遅らせて、続けて塗っている間は最後の1回にまとめる。1024x1024 の
+        PNG 書き出しは 100ms 超えることがあり、ストロークのたびに走ると引っかかる。
+        """
+        self._store_mask()
+        self._update_thumb_selection()
+        self._cancel_pending_save()
+        self._save_after_id = self.root.after(SAVE_DELAY_MS, self._save_now)
+
+    def _save_now(self):
+        self._save_after_id = None
+        self._save_current()
+
+    def _cancel_pending_save(self):
+        if self._save_after_id is not None:
+            self.root.after_cancel(self._save_after_id)
+            self._save_after_id = None
+
+    def _step(self, delta):
+        self._select_index(self.current_index + delta)
+
+    def _on_key_prev(self, event=None):
+        self._step(-1)
+        return "break"
+
+    def _on_key_next(self, event=None):
+        self._step(1)
+        return "break"
+
+    def _on_close(self):
+        # 閉じる直前の1枚も取りこぼさない（保留中の保存を確定させる）
+        self._cancel_pending_save()
+        if self.original_image is not None:
+            self._save_current()
+        self.root.destroy()
 
     def _fit_image(self):
         cw = max(self.canvas.winfo_width(), 1)
@@ -322,6 +509,7 @@ class MosaicApp:
             self.mask_image = self.undo_stack.pop()
             self._rebuild_composite()
             self._refresh_canvas()
+            self._flush_current()
 
     # ── モザイク処理 ──────────────────────────────────────────
 
@@ -548,11 +736,14 @@ class MosaicApp:
         return (cx - self.offset_x) / self.scale, (cy - self.offset_y) / self.scale
 
     def _on_down(self, event):
+        if self.original_image is None:
+            return
         if self.tool == "wand":
             self._push_undo()
             ix, iy = self._canvas_to_image(event.x, event.y)
             self._magic_wand(ix, iy)
             self._refresh_canvas()
+            self._flush_current()
         else:
             self._push_undo()
             self._drawing = True
@@ -564,7 +755,10 @@ class MosaicApp:
         self._cursor_pos = (event.x, event.y)
 
     def _on_up(self, event):
-        self._drawing = False
+        # 保存はストロークの終わりに1回だけ。ドラッグ中に毎回書くと重い
+        if self._drawing:
+            self._drawing = False
+            self._flush_current()
 
     def _apply_point(self, cx, cy):
         ix, iy = self._canvas_to_image(cx, cy)
@@ -575,16 +769,109 @@ class MosaicApp:
             self._paint_brush(ix, iy, radius, erase=(self.tool == "eraser"))
         self._refresh_canvas()
 
-    # ── 完了 ─────────────────────────────────────────────────
+    # ── サムネイル一覧 ────────────────────────────────────────
 
-    def _complete(self):
-        if self.original_image is None:
+    def _build_thumb_cells(self):
+        """先に空のセルを並べておき、サムネイルは出来次第あとから流し込む"""
+        cw = THUMB_PANEL_W - 20
+        for i, (name, _) in enumerate(self.entries):
+            y = i * THUMB_CELL_H
+            self.thumb_canvas.create_rectangle(
+                4, y + 4, cw + 4, y + THUMB_CELL_H - 4,
+                fill="#303030", outline="", tags=("cell", f"cell{i}"),
+            )
+            self.thumb_items[i] = self.thumb_canvas.create_image(
+                (cw + 8) // 2, y + THUMB_CELL_H // 2, tags=("thumb", f"thumb{i}"),
+            )
+            # 塗り済みの印（マスクを持っている画像だけ表示する）
+            self.thumb_marks[i] = self.thumb_canvas.create_oval(
+                cw - 6, y + 10, cw + 2, y + 18,
+                fill="#4ec98a", outline="", state=tk.HIDDEN, tags=f"mark{i}",
+            )
+        self.thumb_canvas.configure(
+            scrollregion=(0, 0, cw + 8, max(1, len(self.entries)) * THUMB_CELL_H)
+        )
+
+    def _start_thumb_loader(self):
+        """サムネイル生成はバックグラウンドで行う（枚数が多いと起動が固まるため）
+
+        PIL の処理だけスレッドで行い、出来たものはキューに積む。tkinter は他スレッドから
+        触れないうえ、root.after すら別スレッドから呼ぶと mainloop 開始前に
+        RuntimeError になるので、取り出しはメインスレッドのポーリングに任せる。
+        """
+        threading.Thread(target=self._thumb_worker, daemon=True).start()
+        self.root.after(50, self._drain_thumb_queue)
+
+    def _thumb_worker(self):
+        for i, (name, _) in enumerate(self.entries):
+            try:
+                im = Image.open(os.path.join(OUTPUT_DIR, name))
+                im.draft("RGB", (THUMB_W * 2, THUMB_W * 2))  # JPEG は間引いて読む
+                im = im.convert("RGB")
+                im.thumbnail((THUMB_W, THUMB_W - 12), Image.BILINEAR)
+            except (OSError, ValueError):
+                continue
+            self._thumb_queue.put((i, im))
+        self._thumb_done = True
+
+    def _drain_thumb_queue(self):
+        try:
+            while True:
+                index, im = self._thumb_queue.get_nowait()
+                self._set_thumb(index, im)
+        except queue.Empty:
+            pass
+        if not self._thumb_done or not self._thumb_queue.empty():
+            self.root.after(50, self._drain_thumb_queue)
+
+    def _set_thumb(self, index, im):
+        if index not in self.thumb_items:
             return
-        src_path = self.images[self.current_index]
-        fname = os.path.basename(src_path)
-        self.composite_image.save(os.path.join(OUTPUT_DIR, fname))
-        self.current_index += 1
-        self.load_image()
+        try:
+            photo = ImageTk.PhotoImage(im)
+        except tk.TclError:
+            return  # ウィンドウが閉じられた後
+        self.thumb_photos[index] = photo  # 参照を保持しないと GC されて消える
+        self.thumb_canvas.itemconfig(self.thumb_items[index], image=photo)
+
+    def _update_thumb_selection(self):
+        cw = THUMB_PANEL_W - 20
+        y = self.current_index * THUMB_CELL_H
+        if self.thumb_sel is None:
+            self.thumb_sel = self.thumb_canvas.create_rectangle(
+                4, y + 4, cw + 4, y + THUMB_CELL_H - 4,
+                outline="#4ec98a", width=2, tags="sel",
+            )
+        else:
+            self.thumb_canvas.coords(
+                self.thumb_sel, 4, y + 4, cw + 4, y + THUMB_CELL_H - 4
+            )
+        self.thumb_canvas.tag_raise("sel")
+        for i, (name, _) in enumerate(self.entries):
+            self.thumb_canvas.itemconfig(
+                self.thumb_marks[i],
+                state=tk.NORMAL if name in self.masks else tk.HIDDEN,
+            )
+
+    def _scroll_to_current(self):
+        total = max(1, len(self.entries)) * THUMB_CELL_H
+        view_h = max(1, self.thumb_canvas.winfo_height())
+        if total <= view_h:
+            return
+        top = self.thumb_canvas.canvasy(0)
+        y = self.current_index * THUMB_CELL_H
+        if y < top:
+            self.thumb_canvas.yview_moveto(y / total)
+        elif y + THUMB_CELL_H > top + view_h:
+            self.thumb_canvas.yview_moveto((y + THUMB_CELL_H - view_h) / total)
+
+    def _on_thumb_click(self, event):
+        index = int(self.thumb_canvas.canvasy(event.y) // THUMB_CELL_H)
+        if 0 <= index < len(self.entries) and index != self.current_index:
+            self._select_index(index)
+
+    def _on_thumb_scroll(self, event):
+        self.thumb_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     # ── ウィンドウリサイズ ────────────────────────────────────
 
