@@ -26,7 +26,7 @@ THUMB_CELL_H = 128      # 一覧1セルの高さ（サムネイルの縦横比�
 THUMB_PANEL_W = 150     # スクロールバーを含む右パネルの幅
 JPEG_QUALITY = 95
 SAVE_DELAY_MS = 400     # 連続ストロークをまとめる待ち時間
-BRUSH_SIZE_MIN, BRUSH_SIZE_MAX = 10, 50
+BRUSH_SIZE_MIN, BRUSH_SIZE_MAX = 3, 50
 BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
@@ -714,8 +714,10 @@ class MosaicApp:
                           outline="#000000", width=3, tags="cursor")
             outline_shape(cx-r, cy-r, cx+r, cy+r,
                           outline=color, width=1, tags="cursor")
-            self.canvas.create_line(cx-4, cy, cx+4, cy, fill=color, width=1, tags="cursor")
-            self.canvas.create_line(cx, cy-4, cx, cy+4, fill=color, width=1, tags="cursor")
+            # 中心の十字。細いブラシだと外周からはみ出すので、半径に合わせて縮める
+            m = min(4, max(1, r - 2))
+            self.canvas.create_line(cx-m, cy, cx+m, cy, fill=color, width=1, tags="cursor")
+            self.canvas.create_line(cx, cy-m, cx, cy+m, fill=color, width=1, tags="cursor")
 
     def _on_motion(self, event):
         self._cursor_pos = (event.x, event.y)
