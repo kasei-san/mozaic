@@ -2,6 +2,8 @@
 
 手動モザイク処理ツール。起動時に `input/` の画像を `output/` へコピーし、右のサムネイル一覧から選んだ画像に、ブラシ・消しゴム・魔法の杖・黒線ブラシでモザイクをかけて `output/` を更新する。
 
+<img width="1442" height="912" alt="image" src="https://github.com/user-attachments/assets/73d41acf-8546-48e6-b612-8a29b4317e45" />
+
 ## セットアップ（初回のみ）
 
 Python 3.10 が必要なのだ。
