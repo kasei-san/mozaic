@@ -12,7 +12,10 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 MOSAIC_BLOCK_RATIO = 100
 MOSAIC_BLOCK_MIN = 4
+WINDOW_W, WINDOW_H = 1280, 980
+WINDOW_SCREEN_MARGIN_W, WINDOW_SCREEN_MARGIN_H = 80, 100
 BRUSH_SIZES = [10, 20, 30, 50, 80]
+BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
@@ -22,15 +25,19 @@ _DEFAULT_SETTINGS = {
     "wand_dilate_scale": 25,
     "line_threshold": 80,
     "line_dilate_scale": 25,
+    "brush_shape": "circle",
 }
 
 def _load_settings():
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        return {**_DEFAULT_SETTINGS, **data}
+        settings = {**_DEFAULT_SETTINGS, **data}
     except (FileNotFoundError, json.JSONDecodeError):
-        return dict(_DEFAULT_SETTINGS)
+        settings = dict(_DEFAULT_SETTINGS)
+    if settings["brush_shape"] not in [s for _, s in BRUSH_SHAPES]:
+        settings["brush_shape"] = _DEFAULT_SETTINGS["brush_shape"]
+    return settings
 
 SETTINGS = _load_settings()
 
@@ -39,7 +46,10 @@ class MosaicApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Mosaic Tool")
-        self.root.geometry("1280x820")
+        # 画面より大きくならないようクランプする（タイトルバー・タスクバーの分を引く）
+        win_w = min(WINDOW_W, root.winfo_screenwidth() - WINDOW_SCREEN_MARGIN_W)
+        win_h = min(WINDOW_H, root.winfo_screenheight() - WINDOW_SCREEN_MARGIN_H)
+        self.root.geometry(f"{win_w}x{win_h}")
         self.root.configure(bg="#1e1e1e")
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -51,6 +61,8 @@ class MosaicApp:
         # tool: "brush" | "eraser" | "wand" | "line"
         self.tool = "brush"
         self.brush_size = 30
+        # brush_shape: "circle" | "square"（ブラシ・消しゴム・黒線ブラシ共通）
+        self.brush_shape = SETTINGS["brush_shape"]
 
         self.original_image = None
         self.pixelated_image = None
@@ -92,6 +104,23 @@ class MosaicApp:
         ctrl.pack(side=tk.LEFT, fill=tk.Y)
         ctrl.pack_propagate(False)
 
+        # 完了ボタンとステータスは下端固定。pack は宣言順に領域を切り出すので、
+        # ウィンドウが低いときでも確実に表示されるよう他より先に pack する
+        # （side=BOTTOM を指定しても、後から pack すると領域が残っておらず消える）
+        self.status_var = tk.StringVar()
+        tk.Label(ctrl, textvariable=self.status_var,
+                 bg="#2b2b2b", fg="#888888",
+                 wraplength=148, justify=tk.CENTER).pack(side=tk.BOTTOM, pady=16, padx=6)
+
+        tk.Button(
+            ctrl, text="完了 →", command=self._complete,
+            bg="#3a9f6e", fg="white", relief=tk.FLAT,
+            activebackground="#4ec98a", bd=0,
+            font=("", 12, "bold"), pady=10,
+        ).pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=4)
+
+        tk.Frame(ctrl, height=1, bg="#444").pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=14)
+
         tk.Label(ctrl, text="筆の太さ", bg="#2b2b2b", fg="#cccccc",
                  font=("", 10, "bold")).pack(pady=(24, 6))
 
@@ -105,6 +134,23 @@ class MosaicApp:
                 command=lambda s=size: self._set_brush(s),
             )
             rb.pack(anchor=tk.W, padx=16, pady=2)
+
+        tk.Label(ctrl, text="筆の形", bg="#2b2b2b", fg="#cccccc",
+                 font=("", 10, "bold")).pack(pady=(14, 4))
+
+        shape_row = tk.Frame(ctrl, bg="#2b2b2b")
+        shape_row.pack()
+        self.shape_var = tk.StringVar(value=self.brush_shape)
+        for label, shape in BRUSH_SHAPES:
+            rb = tk.Radiobutton(
+                shape_row, text=label,
+                variable=self.shape_var, value=shape,
+                bg="#2b2b2b", fg="#cccccc", font=("", 12),
+                selectcolor="#444444", activebackground="#2b2b2b",
+                activeforeground="#ffffff",
+                command=lambda s=shape: self._set_brush_shape(s),
+            )
+            rb.pack(side=tk.LEFT, padx=4)
 
         tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=14)
 
@@ -176,20 +222,6 @@ class MosaicApp:
             activebackground="#777", bd=0, padx=8, pady=6,
         ).pack(fill=tk.X, padx=12, pady=4)
 
-        tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=14)
-
-        tk.Button(
-            ctrl, text="完了 →", command=self._complete,
-            bg="#3a9f6e", fg="white", relief=tk.FLAT,
-            activebackground="#4ec98a", bd=0,
-            font=("", 12, "bold"), pady=10,
-        ).pack(fill=tk.X, padx=12, pady=4)
-
-        self.status_var = tk.StringVar()
-        tk.Label(ctrl, textvariable=self.status_var,
-                 bg="#2b2b2b", fg="#888888",
-                 wraplength=148, justify=tk.CENTER).pack(pady=16, padx=6)
-
         self.canvas = tk.Canvas(self.root, bg="#111111", cursor="none",
                                 highlightthickness=0)
         self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -214,6 +246,11 @@ class MosaicApp:
     def _set_brush(self, size):
         self.brush_size = size
         self._set_tool("brush")
+
+    def _set_brush_shape(self, shape):
+        # 形の変更は消しゴム・黒線ブラシ中にも効かせたいので、ツールは切り替えない
+        self.brush_shape = shape
+        self._redraw_cursor()
 
     def _set_tool(self, tool):
         self.tool = tool
@@ -302,7 +339,11 @@ class MosaicApp:
     def _paint_brush(self, ix, iy, radius, erase):
         draw = ImageDraw.Draw(self.mask_image)
         color = 0 if erase else 255
-        draw.ellipse([ix - radius, iy - radius, ix + radius, iy + radius], fill=color)
+        box = [ix - radius, iy - radius, ix + radius, iy + radius]
+        if self.brush_shape == "square":
+            draw.rectangle(box, fill=color)
+        else:
+            draw.ellipse(box, fill=color)
         self._apply_mask_region(
             int(ix - radius), int(iy - radius),
             int(ix + radius) + 1, int(iy + radius) + 1,
@@ -362,7 +403,7 @@ class MosaicApp:
         self._apply_mask_region(x1, y1, x2, y2)
 
     def _paint_line(self, ix, iy, radius):
-        """ブラシ円内の暗い（黒線）ピクセルだけを mask=255 にする"""
+        """ブラシ形状内の暗い（黒線）ピクセルだけを mask=255 にする"""
         iw, ih = self.original_image.size
         # 膨張分だけ bbox を広げて、膨張が切れないようにする
         dilate_px = int(iw // 100 * self.line_dilate_scale / 100)
@@ -374,14 +415,17 @@ class MosaicApp:
         if x2 <= x1 or y2 <= y1:
             return
 
-        # bbox 内の円形ブラシ形状
+        # bbox 内のブラシ形状
         yy, xx = np.ogrid[y1:y2, x1:x2]
-        circle = (xx - ix) ** 2 + (yy - iy) ** 2 <= radius ** 2
+        if self.brush_shape == "square":
+            shape = (np.abs(xx - ix) <= radius) & (np.abs(yy - iy) <= radius)
+        else:
+            shape = (xx - ix) ** 2 + (yy - iy) ** 2 <= radius ** 2
 
         # 輝度で黒線を判定（しきい値以下を黒線とみなす）
         crop = np.array(self.original_image.crop((x1, y1, x2, y2))).astype(np.int32)
         lum = (crop[:, :, 0] * 299 + crop[:, :, 1] * 587 + crop[:, :, 2] * 114) // 1000
-        dark = (lum <= self.line_threshold) & circle
+        dark = (lum <= self.line_threshold) & shape
 
         region = np.where(dark, 255, 0).astype(np.uint8)
         if dilate_px > 0:
@@ -436,10 +480,13 @@ class MosaicApp:
         else:
             r = self.brush_size
             color = {"eraser": "#ff6666", "line": "#44ddff"}.get(self.tool, "#ffffff")
-            self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                    outline="#000000", width=3, tags="cursor")
-            self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                    outline=color, width=1, tags="cursor")
+            outline_shape = (self.canvas.create_rectangle
+                             if self.brush_shape == "square"
+                             else self.canvas.create_oval)
+            outline_shape(cx-r, cy-r, cx+r, cy+r,
+                          outline="#000000", width=3, tags="cursor")
+            outline_shape(cx-r, cy-r, cx+r, cy+r,
+                          outline=color, width=1, tags="cursor")
             self.canvas.create_line(cx-4, cy, cx+4, cy, fill=color, width=1, tags="cursor")
             self.canvas.create_line(cx, cy-4, cx, cy+4, fill=color, width=1, tags="cursor")
 
