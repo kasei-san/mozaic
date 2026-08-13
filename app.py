@@ -154,7 +154,8 @@ class MosaicApp:
                  bg="#2b2b2b", fg="#888888",
                  wraplength=148, justify=tk.CENTER).pack(side=tk.BOTTOM, pady=16, padx=6)
 
-        tk.Label(ctrl, text="← →  で画像を移動\n塗ると自動保存", bg="#2b2b2b", fg="#666666",
+        tk.Label(ctrl, text="← → ↑ ↓  で画像を移動\n塗ると自動保存",
+                 bg="#2b2b2b", fg="#666666",
                  font=("", 8), justify=tk.CENTER).pack(side=tk.BOTTOM, pady=(0, 4))
 
         tk.Frame(ctrl, height=1, bg="#444").pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=14)
@@ -288,17 +289,22 @@ class MosaicApp:
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
-        self.root.bind("<Control-z>", lambda e: self._undo())
-        self.root.bind("<Control-Z>", lambda e: self._undo())
-        self.root.bind("<Left>", self._on_key_prev)
-        self.root.bind("<Right>", self._on_key_next)
+        self.root.bind("<Control-z>", self._undo)
+        self.root.bind("<Control-Z>", self._undo)
+        for seq in ("<Left>", "<Up>"):
+            self.root.bind(seq, self._on_key_prev)
+        for seq in ("<Right>", "<Down>"):
+            self.root.bind(seq, self._on_key_next)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Scale はフォーカスがあると左右キーで値が動いてしまう。ウィジェット単位の
-        # バインディングはクラスバインディングより先に走るので、そこで break して潰す
+        # Scale はフォーカスがあると矢印キーで値が動いてしまう（左右だけでなく上下も）。
+        # ウィジェット単位のバインディングはクラスバインディングより先に走るので、
+        # そこで break して潰す
         for w in self._descendants(ctrl):
-            w.bind("<Left>", self._on_key_prev)
-            w.bind("<Right>", self._on_key_next)
+            for seq in ("<Left>", "<Up>"):
+                w.bind(seq, self._on_key_prev)
+            for seq in ("<Right>", "<Down>"):
+                w.bind(seq, self._on_key_next)
 
         self._set_tool("brush")
 
@@ -399,7 +405,7 @@ class MosaicApp:
         else:
             self.mask_image = Image.new("L", (iw, ih), 0)
 
-        self.undo_stack = []
+        # undo_stack は全画像で1本なのでここではクリアしない
         self._img_item = None
         self.canvas.delete("img")
 
@@ -502,14 +508,38 @@ class MosaicApp:
     # ── Undo ─────────────────────────────────────────────────
 
     def _push_undo(self):
-        self.undo_stack.append(self.mask_image.copy())
+        """操作前のマスクを、どの画像のものかと一緒に積む
 
-    def _undo(self):
-        if self.undo_stack:
-            self.mask_image = self.undo_stack.pop()
-            self._rebuild_composite()
-            self._refresh_canvas()
-            self._flush_current()
+        履歴は全画像で1本。マスクは PNG 圧縮して持つので、素の L 画像のように
+        1段あたり画像サイズぶん（1024x1024 で 1MB）は食わない。
+        """
+        if self.mask_image is None:
+            return
+        buf = io.BytesIO()
+        self.mask_image.save(buf, format="PNG")
+        self.undo_stack.append((self.entries[self.current_index][0], buf.getvalue()))
+
+    def _undo(self, event=None):
+        """1操作戻す。別の画像の操作だったら、その画像へ移動してから戻す"""
+        if not self.undo_stack:
+            return "break"
+        name, data = self.undo_stack.pop()
+        index = next((i for i, (n, _) in enumerate(self.entries) if n == name), None)
+        if index is None:
+            return "break"  # 一覧から消えたファイル
+        if index != self.current_index:
+            # 移動する。現在の画像の状態はここで保存・保持される
+            self._select_index(index)
+        if self.original_image is None:
+            return "break"
+        mask = Image.open(io.BytesIO(data)).convert("L")
+        if mask.size != self.original_image.size:
+            return "break"
+        self.mask_image = mask
+        self._rebuild_composite()
+        self._refresh_canvas()
+        self._flush_current()
+        return "break"
 
     # ── モザイク処理 ──────────────────────────────────────────
 
