@@ -108,7 +108,7 @@ class MosaicApp:
         self.line_threshold = SETTINGS["line_threshold"]
         self.line_dilate_scale = SETTINGS["line_dilate_scale"]
 
-        # Undo: マスクのスナップショットスタック。現在の画像の分だけ持つ
+        # Undo: (ファイル名, PNG圧縮したマスク) のスタック。画像ごとではなく全画像で1本
         self.undo_stack = []
 
         # サムネイル一覧の描画物（GC されないよう PhotoImage を保持する）
@@ -124,7 +124,8 @@ class MosaicApp:
         self._setup_ui()
 
         if not self.entries:
-            messagebox.showwarning("警告", "input フォルダに画像がないのだ")
+            # 一覧は output を見るので、input が空でも output に残っていれば起動する
+            messagebox.showwarning("警告", "input にも output にも画像がないのだ")
             root.destroy()
             return
         if self.copy_errors:
