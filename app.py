@@ -12,9 +12,11 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 MOSAIC_BLOCK_RATIO = 100
 MOSAIC_BLOCK_MIN = 4
-WINDOW_W, WINDOW_H = 1280, 980
+# 高さは全ウィジェットが収まる実測値（長いファイル名でステータスが折り返した状態で 841）
+# に余裕を持たせた値。足りなくなると Undo ボタンから先に隠れる
+WINDOW_W, WINDOW_H = 1280, 880
 WINDOW_SCREEN_MARGIN_W, WINDOW_SCREEN_MARGIN_H = 80, 100
-BRUSH_SIZES = [10, 20, 30, 50, 80]
+BRUSH_SIZE_MIN, BRUSH_SIZE_MAX = 10, 50
 BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
@@ -26,6 +28,7 @@ _DEFAULT_SETTINGS = {
     "line_threshold": 80,
     "line_dilate_scale": 25,
     "brush_shape": "circle",
+    "brush_size": 20,
 }
 
 def _load_settings():
@@ -37,6 +40,11 @@ def _load_settings():
         settings = dict(_DEFAULT_SETTINGS)
     if settings["brush_shape"] not in [s for _, s in BRUSH_SHAPES]:
         settings["brush_shape"] = _DEFAULT_SETTINGS["brush_shape"]
+    try:
+        size = int(settings["brush_size"])
+    except (TypeError, ValueError):
+        size = _DEFAULT_SETTINGS["brush_size"]
+    settings["brush_size"] = max(BRUSH_SIZE_MIN, min(size, BRUSH_SIZE_MAX))
     return settings
 
 SETTINGS = _load_settings()
@@ -60,7 +68,7 @@ class MosaicApp:
 
         # tool: "brush" | "eraser" | "wand" | "line"
         self.tool = "brush"
-        self.brush_size = 30
+        self.brush_size = SETTINGS["brush_size"]
         # brush_shape: "circle" | "square"（ブラシ・消しゴム・黒線ブラシ共通）
         self.brush_shape = SETTINGS["brush_shape"]
 
@@ -122,21 +130,19 @@ class MosaicApp:
         tk.Frame(ctrl, height=1, bg="#444").pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=14)
 
         tk.Label(ctrl, text="筆の太さ", bg="#2b2b2b", fg="#cccccc",
-                 font=("", 10, "bold")).pack(pady=(24, 6))
+                 font=("", 10, "bold")).pack(pady=(20, 0))
 
         self.brush_var = tk.IntVar(value=self.brush_size)
-        for size in BRUSH_SIZES:
-            rb = tk.Radiobutton(
-                ctrl, text=f"  {size} px",
-                variable=self.brush_var, value=size,
-                bg="#2b2b2b", fg="#cccccc",
-                selectcolor="#444444", activebackground="#2b2b2b",
-                command=lambda s=size: self._set_brush(s),
-            )
-            rb.pack(anchor=tk.W, padx=16, pady=2)
+        tk.Scale(
+            ctrl, from_=BRUSH_SIZE_MIN, to=BRUSH_SIZE_MAX, orient=tk.HORIZONTAL,
+            variable=self.brush_var,
+            command=lambda v: self._set_brush(int(v)),
+            bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
+            troughcolor="#444", activebackground="#777", length=136,
+        ).pack(padx=12)
 
         tk.Label(ctrl, text="筆の形", bg="#2b2b2b", fg="#cccccc",
-                 font=("", 10, "bold")).pack(pady=(14, 4))
+                 font=("", 10, "bold")).pack(pady=(8, 4))
 
         shape_row = tk.Frame(ctrl, bg="#2b2b2b")
         shape_row.pack()
@@ -244,8 +250,11 @@ class MosaicApp:
     # ── ツール選択 ────────────────────────────────────────────
 
     def _set_brush(self, size):
+        # 太さの変更は消しゴム・黒線ブラシ中にも効かせたいので、ツールは切り替えない
+        # （ラジオボタンだった頃はブラシに切り替えていたが、スライダーだと
+        #   ドラッグの途中で毎回ツールが戻ってしまうため）
         self.brush_size = size
-        self._set_tool("brush")
+        self._redraw_cursor()
 
     def _set_brush_shape(self, shape):
         # 形の変更は消しゴム・黒線ブラシ中にも効かせたいので、ツールは切り替えない

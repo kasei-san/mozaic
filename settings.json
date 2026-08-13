@@ -3,5 +3,6 @@
   "wand_dilate_scale": 25,
   "line_threshold": 80,
   "line_dilate_scale": 25,
-  "brush_shape": "circle"
+  "brush_shape": "circle",
+  "brush_size": 20
 }
