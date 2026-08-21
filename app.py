@@ -27,7 +27,11 @@ THUMB_PANEL_W = 150     # スクロールバーを含む右パネルの幅
 JPEG_QUALITY = 95
 SAVE_DELAY_MS = 400     # 連続ストロークをまとめる待ち時間
 BRUSH_SIZE_MIN, BRUSH_SIZE_MAX = 3, 50
-WAND_MIN, WAND_MAX = 1, 100
+WAND_TOLERANCE_MIN, WAND_TOLERANCE_MAX = 1, 100
+# 膨張スケールは実ピクセルではなく画像幅に対する相対値。下限は 0 でなく 1 だが、
+# dilate_px = int(iw // 100 * scale / 100) なので幅 10000px 未満なら 1 は 0 と同じ
+# （1024px 幅だと 10 未満がすべて 0px）。膨張なしは下限側で従来どおり選べる
+WAND_DILATE_MIN, WAND_DILATE_MAX = 1, 100
 BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
@@ -41,6 +45,12 @@ _DEFAULT_SETTINGS = {
     "brush_shape": "circle",
     "brush_size": 20,
 }
+
+_WAND_RANGES = {
+    "wand_tolerance": (WAND_TOLERANCE_MIN, WAND_TOLERANCE_MAX),
+    "wand_dilate_scale": (WAND_DILATE_MIN, WAND_DILATE_MAX),
+}
+
 
 def _load_settings():
     try:
@@ -56,12 +66,12 @@ def _load_settings():
     except (TypeError, ValueError):
         size = _DEFAULT_SETTINGS["brush_size"]
     settings["brush_size"] = max(BRUSH_SIZE_MIN, min(size, BRUSH_SIZE_MAX))
-    for key in ("wand_tolerance", "wand_dilate_scale"):
+    for key, (low, high) in _WAND_RANGES.items():
         try:
             value = int(settings[key])
         except (TypeError, ValueError):
             value = _DEFAULT_SETTINGS[key]
-        settings[key] = max(WAND_MIN, min(value, WAND_MAX))
+        settings[key] = max(low, min(value, high))
     return settings
 
 SETTINGS = _load_settings()
@@ -216,8 +226,8 @@ class MosaicApp:
                  font=("", 9)).pack(anchor=tk.W, padx=12)
         self.tolerance_var = tk.IntVar(value=self.wand_tolerance)
         tk.Scale(
-            ctrl, from_=WAND_MIN, to=WAND_MAX, orient=tk.HORIZONTAL,
-            variable=self.tolerance_var,
+            ctrl, from_=WAND_TOLERANCE_MIN, to=WAND_TOLERANCE_MAX,
+            orient=tk.HORIZONTAL, variable=self.tolerance_var,
             command=lambda v: setattr(self, "wand_tolerance", int(v)),
             bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
             troughcolor="#444", activebackground="#777", length=136,
@@ -227,8 +237,8 @@ class MosaicApp:
                  font=("", 9)).pack(anchor=tk.W, padx=12, pady=(6, 0))
         self.dilate_var = tk.IntVar(value=self.wand_dilate_scale)
         tk.Scale(
-            ctrl, from_=WAND_MIN, to=WAND_MAX, orient=tk.HORIZONTAL,
-            variable=self.dilate_var,
+            ctrl, from_=WAND_DILATE_MIN, to=WAND_DILATE_MAX,
+            orient=tk.HORIZONTAL, variable=self.dilate_var,
             command=lambda v: setattr(self, "wand_dilate_scale", int(v)),
             bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
             troughcolor="#444", activebackground="#777", length=136,
