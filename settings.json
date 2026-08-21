@@ -1,6 +1,6 @@
 {
-  "wand_tolerance": 25,
-  "wand_dilate_scale": 25,
+  "wand_tolerance": 50,
+  "wand_dilate_scale": 50,
   "line_threshold": 80,
   "line_dilate_scale": 25,
   "brush_shape": "circle",
