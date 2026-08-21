@@ -287,6 +287,7 @@ class MosaicApp:
         self.canvas.bind("<B3-Motion>", self._on_pan_drag)
         self.canvas.bind("<ButtonRelease-3>", self._on_pan_end)
         self.canvas.bind("<MouseWheel>", self._on_scroll)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_scroll)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
@@ -480,6 +481,11 @@ class MosaicApp:
             self._save_after_id = None
 
     def _step(self, delta):
+        # ドラッグ中に切り替えると、以降の _apply_point が切り替え先のマスクに
+        # 書き込んでしまう（_push_undo は切り替え前の画像で積まれている）。
+        # キーでも起きるが、Shift+ホイールは同じ手で操作できるぶん現実に起きる
+        if self._drawing:
+            return
         self._select_index(self.current_index + delta)
 
     def _on_key_prev(self, event=None):
@@ -742,6 +748,13 @@ class MosaicApp:
         self.offset_x = int(mx - ix * new_scale)
         self.offset_y = int(my - iy * new_scale)
         self._refresh_canvas()
+
+    def _on_shift_scroll(self, event):
+        # Shift + ホイールで画像を切り替える（上で前、下で次。↑↓キーと同じ）
+        if event.delta == 0:
+            return "break"
+        self._step(-1 if event.delta > 0 else 1)
+        return "break"
 
     # ── パン ─────────────────────────────────────────────────
 
