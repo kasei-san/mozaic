@@ -481,6 +481,11 @@ class MosaicApp:
             self._save_after_id = None
 
     def _step(self, delta):
+        # ドラッグ中に切り替えると、以降の _apply_point が切り替え先のマスクに
+        # 書き込んでしまう（_push_undo は切り替え前の画像で積まれている）。
+        # キーでも起きるが、Shift+ホイールは同じ手で操作できるぶん現実に起きる
+        if self._drawing:
+            return
         self._select_index(self.current_index + delta)
 
     def _on_key_prev(self, event=None):
@@ -746,6 +751,8 @@ class MosaicApp:
 
     def _on_shift_scroll(self, event):
         # Shift + ホイールで画像を切り替える（上で前、下で次。↑↓キーと同じ）
+        if event.delta == 0:
+            return "break"
         self._step(-1 if event.delta > 0 else 1)
         return "break"
 
