@@ -287,6 +287,7 @@ class MosaicApp:
         self.canvas.bind("<B3-Motion>", self._on_pan_drag)
         self.canvas.bind("<ButtonRelease-3>", self._on_pan_end)
         self.canvas.bind("<MouseWheel>", self._on_scroll)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_scroll)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
@@ -742,6 +743,11 @@ class MosaicApp:
         self.offset_x = int(mx - ix * new_scale)
         self.offset_y = int(my - iy * new_scale)
         self._refresh_canvas()
+
+    def _on_shift_scroll(self, event):
+        # Shift + ホイールで画像を切り替える（上で前、下で次。↑↓キーと同じ）
+        self._step(-1 if event.delta > 0 else 1)
+        return "break"
 
     # ── パン ─────────────────────────────────────────────────
 
