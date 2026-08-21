@@ -27,14 +27,15 @@ THUMB_PANEL_W = 150     # スクロールバーを含む右パネルの幅
 JPEG_QUALITY = 95
 SAVE_DELAY_MS = 400     # 連続ストロークをまとめる待ち時間
 BRUSH_SIZE_MIN, BRUSH_SIZE_MAX = 3, 50
+WAND_MIN, WAND_MAX = 1, 100
 BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
 
 _DEFAULT_SETTINGS = {
-    "wand_tolerance": 25,
-    "wand_dilate_scale": 25,
+    "wand_tolerance": 50,
+    "wand_dilate_scale": 50,
     "line_threshold": 80,
     "line_dilate_scale": 25,
     "brush_shape": "circle",
@@ -55,6 +56,12 @@ def _load_settings():
     except (TypeError, ValueError):
         size = _DEFAULT_SETTINGS["brush_size"]
     settings["brush_size"] = max(BRUSH_SIZE_MIN, min(size, BRUSH_SIZE_MAX))
+    for key in ("wand_tolerance", "wand_dilate_scale"):
+        try:
+            value = int(settings[key])
+        except (TypeError, ValueError):
+            value = _DEFAULT_SETTINGS[key]
+        settings[key] = max(WAND_MIN, min(value, WAND_MAX))
     return settings
 
 SETTINGS = _load_settings()
@@ -209,7 +216,7 @@ class MosaicApp:
                  font=("", 9)).pack(anchor=tk.W, padx=12)
         self.tolerance_var = tk.IntVar(value=self.wand_tolerance)
         tk.Scale(
-            ctrl, from_=1, to=100, orient=tk.HORIZONTAL,
+            ctrl, from_=WAND_MIN, to=WAND_MAX, orient=tk.HORIZONTAL,
             variable=self.tolerance_var,
             command=lambda v: setattr(self, "wand_tolerance", int(v)),
             bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
@@ -220,7 +227,7 @@ class MosaicApp:
                  font=("", 9)).pack(anchor=tk.W, padx=12, pady=(6, 0))
         self.dilate_var = tk.IntVar(value=self.wand_dilate_scale)
         tk.Scale(
-            ctrl, from_=0, to=200, orient=tk.HORIZONTAL,
+            ctrl, from_=WAND_MIN, to=WAND_MAX, orient=tk.HORIZONTAL,
             variable=self.dilate_var,
             command=lambda v: setattr(self, "wand_dilate_scale", int(v)),
             bg="#2b2b2b", fg="#cccccc", highlightthickness=0,
