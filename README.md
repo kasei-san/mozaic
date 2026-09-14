@@ -38,6 +38,18 @@ run.bat
 
 `input/` と `output/` の中身をまとめて消したいときは `clear.bat` を使うのだ。**確認プロンプトは出ず、実行した瞬間に削除される**（`.gitkeep` だけは残る）。
 
+## 自動モザイク（任意）
+
+AI（YOLO）で局部を見つけて、先に自動でモザイクをかけておける。結果は `input/` に入るので、`run.bat` で確認して漏れを塗り足すのだ。
+
+```
+venv\Scripts\pip install -r requirements-auto.txt
+venv\Scripts\python auto_mosaic.py <元画像のフォルダ>
+run.bat
+```
+
+検出モデルの入手・置き場所・ComfyUI のノードとしての使い方は [docs/auto_mosaic.md](docs/auto_mosaic.md) を読むのだ。
+
 ## ツール
 
 左のコントロールパネルで選択する。選んだツールが左クリック／ドラッグに割り当たるのだ。
@@ -215,6 +227,11 @@ mosaic/
 ├── clear.bat         # input / output のファイルを一括削除
 ├── requirements.txt
 ├── .python-version   # 想定 Python バージョンの記録（setup.bat 側は py -3.10 を直書き）
+├── auto_mosaic.py    # 自動モザイク（任意・docs/auto_mosaic.md）
+├── requirements-auto.txt
+├── models/segm/      # 自動モザイクの検出モデルを置く（.pt は git 管理外）
+├── comfyui/          # 自動モザイクの ComfyUI ノード
+├── docs/             # 自動モザイクの説明
 ├── input/            # 処理対象画像を置く（.gitkeep 以外は git 管理外）
 └── output/           # 保存先（.gitkeep 以外は git 管理外）
 ```
