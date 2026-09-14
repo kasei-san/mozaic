@@ -15,6 +15,18 @@ Python は Pillow・numpy 入りの環境を使用。
 - `input/` — 処理対象画像を置く（画像は git 管理外）。**アプリ側から書き換えることはない**（原本）
 - `output/` — 作業領域 兼 保存先（画像は git 管理外）。起動時に input からコピーされる。同名ファイルが既にあればコピーしない（前回の作業結果を潰さない）
 
+## 自動モザイク（auto_mosaic.py）
+
+利用者向けの説明は `docs/auto_mosaic.md`。ここは実装上の注意だけ。
+
+- 処理は `detect_mask`（YOLO で検出してマスク）→ `expand_mask`（外へ広げる）→ `pixelate`（全体をモザイク）→ `Image.composite` の4段。**ComfyUI ノード（`comfyui/mozaic_auto`）はこの関数を import して呼ぶだけ**で、処理を二重に持たない
+- `MOSAIC_BLOCK_RATIO` `MOSAIC_BLOCK_MIN` `JPEG_QUALITY` は app.py と同じ値を**写してある**（ノードは ComfyUI の Python で動き、tkinter が無い環境があるので app.py を import しない）。app.py 側を変えたら揃える
+- **既定の書き出し先は `output/` ではなく `input/`**。app.py は塗るたびに input の同名画像を元に作り直すので、output にだけ置くと1筆塗った時点で自動モザイクが消える
+- 元画像のフォルダと書き出し先が同じならエラーで止める。書き出し先に同名があればスキップ（GUI で塗り足した結果を潰さない）。`--overwrite` で上書き
+- 検出ゼロの画像は `shutil.copy2` でバイナリコピー（再保存しない＝JPEG を劣化させない）
+- クラス名はモデルごとに違う（`vagina` / `pussy` / `genitalia_f`）。モデルに無いクラス名は無視されるので、既定には全モデルの呼び名を並べてある
+- `ultralytics` は `requirements-auto.txt` に分けてある。app.py だけ使う人に PyTorch を入れさせないため
+
 ## 保存モデル
 
 **保存ボタンは無い。** 経緯は PR #14。
