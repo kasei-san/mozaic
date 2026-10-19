@@ -38,8 +38,9 @@ BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
-# 自動検出の矩形を、矩形の幅・高さに対してこの割合ずつ外側へ広げて塗る
-DETECT_PAD_RATIO = 0.1
+# 自動検出の矩形を、矩形の幅・高さに対してこの割合ずつ外側へ広げて塗る。
+# 0.1 だと実画像で顔や手を巻き込んだので 0 にした
+DETECT_PAD_RATIO = 0.0
 DETECT_THRESHOLD_MIN, DETECT_THRESHOLD_MAX = 0.05, 0.95
 DETECT_POLL_MS = 100
 
