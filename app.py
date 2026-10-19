@@ -10,6 +10,8 @@ import queue
 import shutil
 import threading
 
+import detector
+
 INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -36,6 +38,10 @@ BRUSH_SHAPES = [("○", "circle"), ("□", "square")]
 ZOOM_FACTOR = 1.15
 ZOOM_MIN = 0.05
 ZOOM_MAX = 20.0
+# 自動検出の矩形を、矩形の幅・高さに対してこの割合ずつ外側へ広げて塗る
+DETECT_PAD_RATIO = 0.1
+DETECT_THRESHOLD_MIN, DETECT_THRESHOLD_MAX = 0.05, 0.95
+DETECT_POLL_MS = 100
 
 _DEFAULT_SETTINGS = {
     "wand_tolerance": 50,
@@ -44,6 +50,10 @@ _DEFAULT_SETTINGS = {
     "line_dilate_scale": 25,
     "brush_shape": "circle",
     "brush_size": 20,
+    # 0.238 はモデル配布元の threshold.json（F1 が最大になる値）
+    "detect_threshold": 0.238,
+    # 乳首（nipple_f）は既定では対象外。対象にするなら設定ファイルで足す
+    "detect_labels": ["penis", "pussy"],
 }
 
 _WAND_RANGES = {
@@ -72,6 +82,17 @@ def _load_settings():
         except (TypeError, ValueError):
             value = _DEFAULT_SETTINGS[key]
         settings[key] = max(low, min(value, high))
+    try:
+        threshold = float(settings["detect_threshold"])
+    except (TypeError, ValueError):
+        threshold = _DEFAULT_SETTINGS["detect_threshold"]
+    settings["detect_threshold"] = max(DETECT_THRESHOLD_MIN,
+                                       min(threshold, DETECT_THRESHOLD_MAX))
+    labels = settings["detect_labels"]
+    # 空リストだと何も検出せずに「検出 0件」と出て、見落としが無いように見えてしまう
+    if (not isinstance(labels, list) or not labels
+            or not all(l in detector.LABELS for l in labels)):
+        settings["detect_labels"] = list(_DEFAULT_SETTINGS["detect_labels"])
     return settings
 
 SETTINGS = _load_settings()
@@ -136,6 +157,9 @@ class MosaicApp:
         self._thumb_queue = queue.Queue()
         self._thumb_done = False
         self._save_after_id = None
+        # 自動検出は別スレッドで走らせ、結果は queue 経由でメインスレッドが受け取る
+        self._detect_queue = queue.Queue()
+        self._detecting = False
 
         self._build_entries()
         self._setup_ui()
@@ -271,11 +295,20 @@ class MosaicApp:
 
         tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=(10, 4))
 
+        # パネルの高さに余裕が無いので、自動検出と Undo は1行に並べる
+        action_row = tk.Frame(ctrl, bg="#2b2b2b")
+        action_row.pack(fill=tk.X, padx=12, pady=4)
+        self.detect_button = tk.Button(
+            action_row, text="自動検出", command=self._auto_detect,
+            bg="#3d6b55", fg="white", relief=tk.FLAT,
+            activebackground="#4e8a6d", bd=0, padx=4, pady=6,
+        )
+        self.detect_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         tk.Button(
-            ctrl, text="Undo  (Ctrl+Z)", command=self._undo,
+            action_row, text="Undo", command=self._undo,
             bg="#555555", fg="white", relief=tk.FLAT,
-            activebackground="#777", bd=0, padx=8, pady=6,
-        ).pack(fill=tk.X, padx=12, pady=4)
+            activebackground="#777", bd=0, padx=4, pady=6,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # 右のサムネイル一覧。canvas より先に pack して右端を確保する
         side = tk.Frame(self.root, width=THUMB_PANEL_W, bg="#252525")
@@ -434,7 +467,7 @@ class MosaicApp:
             self.original_image.resize((bw, bh), Image.BOX).resize((iw, ih), Image.NEAREST)
         )
 
-        self.status_var.set(f"{self.current_index + 1} / {len(self.entries)}\n\n{name}")
+        self._set_status()
         self.root.title(
             f"Mosaic Tool  [{self.current_index + 1}/{len(self.entries)}]  {name}"
         )
@@ -442,6 +475,15 @@ class MosaicApp:
         self._fit_image()
         self._rebuild_composite()
         self._refresh_canvas()
+
+    def _set_status(self, note=""):
+        """ステータスは「番号 / 空行 / ファイル名」。note はその空行に入れる
+
+        ステータスは pack の先頭で領域を取るので、行が増えると下のボタンが押し出されて
+        消える（長いファイル名が折り返すと元から 841px 使う）。行数を増やさないこと。
+        """
+        name = self.entries[self.current_index][0]
+        self.status_var.set(f"{self.current_index + 1} / {len(self.entries)}\n{note}\n{name}")
 
     def _store_mask(self):
         """現在のマスクを PNG に圧縮して保持する。一度も塗っていなければ捨てる"""
@@ -690,6 +732,78 @@ class MosaicApp:
         merged = np.maximum(sub, region).astype(np.uint8)
         self.mask_image.paste(Image.fromarray(merged, mode="L"), (x1, y1))
         self._apply_mask_region(x1, y1, x2, y2)
+
+    # ── 自動検出 ──────────────────────────────────────────────
+
+    def _auto_detect(self):
+        """現在の画像で局部を検出し、見つかった矩形をマスクに足す
+
+        推論（初回はモデルのダウンロードも）は数百 ms〜数十秒かかるので別スレッドで行う。
+        tkinter は他スレッドから触れないので、結果は queue に積んでメインスレッドで拾う。
+        """
+        if self.original_image is None or self._detecting:
+            return
+        if not detector.is_available():
+            messagebox.showwarning(
+                "警告", "onnxruntime が入っていないのだ。\nsetup.bat をやり直すのだ")
+            return
+        name = self.entries[self.current_index][0]
+        # original_image は画像切り替えで差し替わるだけで中身は書き換えないので、
+        # 参照をそのまま渡してよい
+        image = self.original_image
+        first = not os.path.exists(detector.MODEL_PATH)
+        self._detecting = True
+        self.detect_button.config(state=tk.DISABLED)
+        # note は折り返すと行が増えるので 12 文字程度まで（_set_status を見ること）
+        self._set_status("モデル取得中(43MB)" if first else "検出中…")
+
+        def work():
+            try:
+                found = detector.detect(image, SETTINGS["detect_threshold"],
+                                        SETTINGS["detect_labels"])
+                self._detect_queue.put((name, found, None))
+            except Exception as e:  # ダウンロード失敗・モデル破損など何でも UI に返す
+                self._detect_queue.put((name, None, e))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(DETECT_POLL_MS, self._poll_detect)
+
+    def _poll_detect(self):
+        try:
+            item = self._detect_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(DETECT_POLL_MS, self._poll_detect)
+            return
+        if self._drawing:
+            # ストロークの途中で積むと Undo の順序が崩れるので、塗り終わるまで待つ
+            self._detect_queue.put(item)
+            self.root.after(DETECT_POLL_MS, self._poll_detect)
+            return
+        self._detecting = False
+        self.detect_button.config(state=tk.NORMAL)
+        name, found, error = item
+        if error is not None:
+            self._set_status("検出失敗")
+            messagebox.showwarning("警告", f"検出に失敗したのだ:\n{error}")
+            return
+        if self.original_image is None or self.entries[self.current_index][0] != name:
+            # 切り替え先の画像の結果ではないので捨てる
+            if self.original_image is not None:
+                self._set_status("切替で検出を破棄")
+            return
+        if not found:
+            self._set_status("検出 0件")
+            return
+
+        self._push_undo()
+        draw = ImageDraw.Draw(self.mask_image)
+        for x1, y1, x2, y2, _, _ in found:
+            px, py = (x2 - x1) * DETECT_PAD_RATIO, (y2 - y1) * DETECT_PAD_RATIO
+            draw.rectangle([x1 - px, y1 - py, x2 + px, y2 + py], fill=255)
+        self._rebuild_composite()
+        self._refresh_canvas()
+        self._flush_current()
+        self._set_status(f"検出 {len(found)}件を塗った")
 
     # ── 表示 ─────────────────────────────────────────────────
 

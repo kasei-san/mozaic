@@ -4,5 +4,7 @@
   "line_threshold": 80,
   "line_dilate_scale": 25,
   "brush_shape": "circle",
-  "brush_size": 20
+  "brush_size": 20,
+  "detect_threshold": 0.238,
+  "detect_labels": ["penis", "pussy"]
 }
