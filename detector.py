@@ -5,6 +5,7 @@ dghs-imgutils 経由だと pandas・scipy・scikit-learn・opencv まで入り�
 """
 import hashlib
 import os
+import shutil
 import urllib.request
 
 import numpy as np
@@ -23,6 +24,7 @@ LABELS = ["nipple_f", "penis", "pussy"]
 INFER_MAX = 640   # 長辺をこの長さに縮めて推論する（学習時の解像度）
 STRIDE = 32       # 入力の縦横はこの倍数でなければならない
 IOU_THRESHOLD = 0.7
+DOWNLOAD_TIMEOUT_SEC = 30
 
 _session = None
 
@@ -45,13 +47,21 @@ def _sha256(path):
 
 def _ensure_model():
     if os.path.exists(MODEL_PATH):
-        return
+        # 既存のファイルも照合する（43MB で 0.1 秒程度）。壊れていたら消して取り直させる
+        if _sha256(MODEL_PATH) == MODEL_SHA256:
+            return
+        os.remove(MODEL_PATH)
+        raise RuntimeError("models/ のモデルが壊れていたので消したのだ。もう一度押すと取り直すのだ")
     os.makedirs(MODEL_DIR, exist_ok=True)
     tmp = MODEL_PATH + ".part"
-    urllib.request.urlretrieve(MODEL_URL, tmp)
+    # urlretrieve はタイムアウトを持てず、回線が止まるとワーカーが戻らない
+    # （ボタンが押せないままになる）。timeout は1回の読み取りの待ち時間
+    with urllib.request.urlopen(MODEL_URL, timeout=DOWNLOAD_TIMEOUT_SEC) as res, \
+            open(tmp, "wb") as f:
+        shutil.copyfileobj(res, f, 1 << 20)
     if _sha256(tmp) != MODEL_SHA256:
         os.remove(tmp)
-        raise RuntimeError("ダウンロードしたモデルの sha256 が一致しない")
+        raise RuntimeError("ダウンロードしたモデルの sha256 が一致しないのだ")
     os.replace(tmp, MODEL_PATH)
 
 
@@ -98,11 +108,14 @@ def detect(image, conf_threshold, labels):
     x = arr.transpose(2, 0, 1)[np.newaxis]
 
     out = session.run(None, {session.get_inputs()[0].name: x})[0][0].T  # (N, 4 + クラス数)
-    class_scores = out[:, 4:]
+    # 対象外のクラスを先に 0 にしてから argmax する。逆順だと、対象外（例: nipple_f）が
+    # 最大のアンカーは、対象のクラスがしきい値を超えていても捨てられて見落としになる
+    class_scores = out[:, 4:].copy()
+    wanted = np.isin(np.arange(len(LABELS)), [LABELS.index(n) for n in labels if n in LABELS])
+    class_scores[:, ~wanted] = 0.0
     cls = class_scores.argmax(axis=1)
     score = class_scores[np.arange(len(cls)), cls]
-    wanted = np.isin(cls, [LABELS.index(name) for name in labels if name in LABELS])
-    sel = (score >= conf_threshold) & wanted
+    sel = score >= conf_threshold
     if not sel.any():
         return []
     cx, cy, w, h = out[sel, 0], out[sel, 1], out[sel, 2], out[sel, 3]
@@ -114,7 +127,7 @@ def detect(image, conf_threshold, labels):
     for c in np.unique(cls):  # NMS はクラスごと
         idx = np.where(cls == c)[0]
         for k in _nms(boxes[idx], score[idx], IOU_THRESHOLD):
-            x1, y1, x2, y2 = boxes[idx[k]]
+            x1, y1, x2, y2 = (float(v) for v in boxes[idx[k]])
             results.append((
                 max(0.0, x1 * sx), max(0.0, y1 * sy),
                 min(float(iw), x2 * sx), min(float(ih), y2 * sy),

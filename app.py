@@ -62,6 +62,9 @@ _WAND_RANGES = {
 }
 
 
+SETTINGS_WARNINGS = []  # 起動時に警告として出す
+
+
 def _load_settings():
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
@@ -88,11 +91,19 @@ def _load_settings():
         threshold = _DEFAULT_SETTINGS["detect_threshold"]
     settings["detect_threshold"] = max(DETECT_THRESHOLD_MIN,
                                        min(threshold, DETECT_THRESHOLD_MAX))
+    # 打ち間違えたラベルが黙って外れると、塗られているつもりで見落とすので起動時に知らせる。
+    # 空リストも、何も検出せずに「検出 0件」と出て見落としが無いように見えるので既定値に戻す
     labels = settings["detect_labels"]
-    # 空リストだと何も検出せずに「検出 0件」と出て、見落としが無いように見えてしまう
-    if (not isinstance(labels, list) or not labels
-            or not all(l in detector.LABELS for l in labels)):
-        settings["detect_labels"] = list(_DEFAULT_SETTINGS["detect_labels"])
+    if not isinstance(labels, list):
+        SETTINGS_WARNINGS.append(f"detect_labels がリストでないので既定値にしたのだ: {labels!r}")
+        labels = []
+    unknown = [l for l in labels if l not in detector.LABELS]
+    if unknown:
+        SETTINGS_WARNINGS.append(f"detect_labels の知らないラベルを無視したのだ: {unknown}")
+    labels = [l for l in labels if l in detector.LABELS]
+    if not labels:
+        labels = list(_DEFAULT_SETTINGS["detect_labels"])
+    settings["detect_labels"] = labels
     return settings
 
 SETTINGS = _load_settings()
@@ -176,6 +187,8 @@ class MosaicApp:
                 + "\n".join(self.copy_errors[:10])
                 + ("\n..." if len(self.copy_errors) > 10 else ""),
             )
+        if SETTINGS_WARNINGS:
+            messagebox.showwarning("settings.json", "\n\n".join(SETTINGS_WARNINGS))
 
         self._build_thumb_cells()
         self._select_index(0)
@@ -480,7 +493,8 @@ class MosaicApp:
         """ステータスは「番号 / 空行 / ファイル名」。note はその空行に入れる
 
         ステータスは pack の先頭で領域を取るので、行が増えると下のボタンが押し出されて
-        消える（長いファイル名が折り返すと元から 841px 使う）。行数を増やさないこと。
+        消える（ファイル名が3行に折り返すと、高さ 832px を切った時点で Undo の行が消える）。
+        行数を増やさないこと。
         """
         name = self.entries[self.current_index][0]
         self.status_var.set(f"{self.current_index + 1} / {len(self.entries)}\n{note}\n{name}")
