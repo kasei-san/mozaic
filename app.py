@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import numpy as np
 from collections import deque
@@ -127,6 +127,13 @@ def _paint_boxes(mask, found):
         draw.rectangle([x1 - px, y1 - py, x2 + px, y2 + py], fill=255)
 
 
+def _make_thumb(im):
+    """一覧のサムネイル用に縮める（PhotoImage にするのはメインスレッドで）"""
+    im = im.convert("RGB")
+    im.thumbnail((THUMB_W, THUMB_W - 12), Image.BILINEAR)
+    return im
+
+
 def _to_png(mask):
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
@@ -213,6 +220,8 @@ class MosaicApp:
         # 一括検出の実行中は編集・画像の切り替え・Undo を止める（下記 _batch_detect）
         self._batch_queue = queue.Queue()
         self._batch_running = False
+        self._batch_stop = threading.Event()  # 中止ボタン。ワーカーが1枚ごとに見る
+        self._batch_dialog = None
 
         self._build_entries()
         self._setup_ui()
@@ -350,28 +359,29 @@ class MosaicApp:
 
         tk.Frame(ctrl, height=1, bg="#444").pack(fill=tk.X, padx=10, pady=(10, 4))
 
-        # パネルの高さに余裕が無いので、自動検出・一括検出・Undo は1行に並べる。
-        # 行の幅は 136px。「自動検出」「一括検出」(各 61px) と Undo (42px) は収まらないので
-        # 「検出」「一括」(各 37px) にしてある
+        # パネルの高さに余裕が無いので、自動検出と Undo は1行に並べる
         action_row = tk.Frame(ctrl, bg="#2b2b2b")
         action_row.pack(fill=tk.X, padx=12, pady=4)
         self.detect_button = tk.Button(
-            action_row, text="検出", command=self._auto_detect,
+            action_row, text="自動検出", command=self._auto_detect,
             bg="#3d6b55", fg="white", relief=tk.FLAT,
             activebackground="#4e8a6d", bd=0, padx=4, pady=6,
         )
         self.detect_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
-        self.batch_button = tk.Button(
-            action_row, text="一括", command=self._batch_detect,
-            bg="#3d6b55", fg="white", relief=tk.FLAT,
-            activebackground="#4e8a6d", bd=0, padx=4, pady=6,
-        )
-        self.batch_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         tk.Button(
             action_row, text="Undo", command=self._undo,
             bg="#555555", fg="white", relief=tk.FLAT,
             activebackground="#777", bd=0, padx=4, pady=6,
         ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+
+        # 一括検出はたまにしか押さないので、よく使う行には混ぜずに一番下へ置く。
+        # pack は後のものから隠れるので、ウィンドウが低いとこれが最初に消える
+        self.batch_button = tk.Button(
+            ctrl, text="一括検出", command=self._batch_detect,
+            bg="#3d6b55", fg="white", relief=tk.FLAT,
+            activebackground="#4e8a6d", bd=0, padx=4, pady=6,
+        )
+        self.batch_button.pack(fill=tk.X, padx=12, pady=4)
 
         # 右のサムネイル一覧。canvas より先に pack して右端を確保する
         side = tk.Frame(self.root, width=THUMB_PANEL_W, bg="#252525")
@@ -880,7 +890,7 @@ class MosaicApp:
             self._cancel_pending_save()
             self._save_current()
             self._store_mask()
-        targets = [(n, s) for n, s in self.entries
+        targets = [(i, n, s) for i, (n, s) in enumerate(self.entries)
                    if n not in self.masks and n not in self.saved]
         if not targets:
             messagebox.showinfo("一括検出", "まだ塗っていない画像が無いのだ")
@@ -891,70 +901,118 @@ class MosaicApp:
                 "見つかったら output に書き込むのだ。\n\n"
                 "前のセッションで編集した画像（output が input と違うもの）と、"
                 "input に原本が無い画像は飛ばすのだ。\n"
-                "実行中は編集できないのだ（閉じるのはできる）"):
+                "実行中は編集できないのだ（中止はできる）"):
             return
 
         self._batch_running = True
+        self._batch_stop.clear()
         self.detect_button.config(state=tk.DISABLED)
         self.batch_button.config(state=tk.DISABLED)
-        first = not os.path.exists(detector.MODEL_PATH)
-        self._set_status("モデル取得中(43MB)" if first else f"一括 0/{len(targets)}")
         self._batch_counts = {"done": 0, "none": 0, "skip": 0, "error": 0}
         self._batch_errors = []
         self._batch_total = len(targets)
+        self._open_batch_dialog(first=not os.path.exists(detector.MODEL_PATH))
         threading.Thread(target=self._batch_worker, args=(targets,), daemon=True).start()
         self.root.after(DETECT_POLL_MS, self._poll_batch)
 
+    def _open_batch_dialog(self, first):
+        """進捗のダイアログ。grab_set で、閉じるまで本体の操作を受け付けなくする"""
+        dlg = tk.Toplevel(self.root, bg="#2b2b2b")
+        dlg.title("一括検出")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.protocol("WM_DELETE_WINDOW", self._cancel_batch)  # × は中止と同じ扱い
+        self._batch_label = tk.Label(
+            dlg, bg="#2b2b2b", fg="#cccccc", width=34,
+            text="モデルを取得中…（約 43MB、初回のみ）" if first else self._batch_progress_text(),
+        )
+        self._batch_label.pack(padx=20, pady=(18, 8))
+        self._batch_bar = ttk.Progressbar(dlg, length=260, maximum=self._batch_total)
+        self._batch_bar.pack(padx=20, pady=4)
+        self._batch_cancel_button = tk.Button(
+            dlg, text="中止", command=self._cancel_batch,
+            bg="#555555", fg="white", relief=tk.FLAT,
+            activebackground="#777", bd=0, padx=16, pady=4,
+        )
+        self._batch_cancel_button.pack(pady=(8, 16))
+        # 本体の中央に出す
+        dlg.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dlg.grab_set()
+        dlg.focus_set()
+        self._batch_dialog = dlg
+
+    def _batch_progress_text(self):
+        handled = sum(self._batch_counts.values())
+        if handled >= self._batch_total:
+            return f"{self._batch_total}枚中 {self._batch_total}枚 完了"
+        return f"{self._batch_total}枚中 {handled + 1}枚目を処理中…"
+
+    def _cancel_batch(self):
+        # 処理中の1枚は最後まで走る（output を書きかけで止めないため）
+        self._batch_stop.set()
+        self._batch_cancel_button.config(state=tk.DISABLED)
+        self._batch_label.config(text="中止しているのだ…（処理中の1枚が終わるまで）")
+
     def _batch_worker(self, targets):
         """ワーカースレッド。tkinter と self の状態には触らず、結果は queue に積むだけ"""
-        for name, src in targets:
+        for index, name, src in targets:
+            if self._batch_stop.is_set():
+                break
             dst = os.path.join(OUTPUT_DIR, name)
             try:
                 # filecmp は stat（サイズ・更新日時）が同じなら中身を読まない。
                 # 起動時のコピーは copy2 なので、未編集なら stat が一致する
                 if src == dst or not filecmp.cmp(src, dst, shallow=True):
-                    self._batch_queue.put(("skip", name, None))
+                    self._batch_queue.put(("skip", index, None))
                     continue
                 image = Image.open(src).convert("RGB")
             except OSError as e:
-                self._batch_queue.put(("error", name, e))
+                self._batch_queue.put(("error", index, e))
                 continue
             try:
                 found = detector.detect(image, SETTINGS["detect_threshold"],
                                         SETTINGS["detect_labels"])
             except Exception as e:  # モデルの取得失敗などは全画像で同じなので打ち切る
-                self._batch_queue.put(("fatal", name, e))
+                self._batch_queue.put(("fatal", index, e))
                 return
             if not found:
-                self._batch_queue.put(("none", name, None))
+                self._batch_queue.put(("none", index, None))
                 continue
             mask = Image.new("L", image.size, 0)
             _paint_boxes(mask, found)
+            composite = Image.composite(_pixelate(image), image, mask)
             try:
-                _write_image(Image.composite(_pixelate(image), image, mask), dst)
+                _write_image(composite, dst)
             except OSError as e:
-                self._batch_queue.put(("error", name, e))
+                self._batch_queue.put(("error", index, e))
                 continue
-            # Undo 用に、塗る前（空）のマスクも一緒に返す
+            # Undo 用に、塗る前（空）のマスクも一緒に返す。一覧のサムネイルも作り直す
+            # （起動時に作ったものは塗る前の見た目のまま）
             empty = Image.new("L", image.size, 0)
-            self._batch_queue.put(("done", name, (_to_png(mask), _to_png(empty))))
+            self._batch_queue.put(("done", index,
+                                   (_to_png(mask), _to_png(empty), _make_thumb(composite))))
         self._batch_queue.put(("end", None, None))
 
     def _poll_batch(self):
         try:
             while True:
-                kind, name, payload = self._batch_queue.get_nowait()
+                kind, index, payload = self._batch_queue.get_nowait()
                 if kind in ("end", "fatal"):
                     self._finish_batch(payload if kind == "fatal" else None)
                     return
                 self._batch_counts[kind] += 1
+                name = self.entries[index][0]
                 if kind == "done":
-                    mask_png, empty_png = payload
+                    mask_png, empty_png, thumb = payload
                     self.masks[name] = mask_png
                     self.saved.add(name)
                     # 1枚ずつ積む。Undo は全画像で1本なので、1回ごとにその画像へ移動して戻る
                     self.undo_stack.append((name, empty_png))
-                    if name == self.entries[self.current_index][0]:
+                    self._set_thumb(index, thumb)
+                    if index == self.current_index:
                         # 表示中の画像はその場で読み直す。メモリ上の空のマスクのまま閉じると、
                         # _on_close の _save_current が書いたばかりの結果を塗る前に戻す
                         self._load_current()
@@ -963,13 +1021,23 @@ class MosaicApp:
         except queue.Empty:
             pass
         handled = sum(self._batch_counts.values())
-        self._set_status(f"一括 {handled}/{self._batch_total}")
+        self._batch_bar.config(value=handled)
+        if not self._batch_stop.is_set() and handled:
+            self._batch_label.config(text=self._batch_progress_text())
         self.root.after(DETECT_POLL_MS, self._poll_batch)
 
     def _finish_batch(self, fatal):
         self._batch_running = False
+        if self._batch_dialog is not None:
+            self._batch_dialog.grab_release()
+            self._batch_dialog.destroy()
+            self._batch_dialog = None
         self.detect_button.config(state=tk.NORMAL)
         self.batch_button.config(state=tk.NORMAL)
+        # 表示中の画像を読み直す。塗られていればモザイクの掛かった見た目になる
+        # （塗られていなければ self.masks の内容は一括の前と同じなので、見た目は変わらない）
+        if self.original_image is not None:
+            self._load_current()
         self._update_thumb_selection()
         c = self._batch_counts
         self._set_status(f"一括 {c['done']}枚を塗った")
@@ -980,9 +1048,13 @@ class MosaicApp:
         ]
         if self._batch_errors:
             lines.append(f"失敗: {len(self._batch_errors)} 枚\n" + "\n".join(self._batch_errors[:10]))
+        rest = self._batch_total - sum(c.values())
         if fatal is not None:
-            lines.append(f"\n途中で打ち切ったのだ:\n{fatal}")
+            lines.append(f"\n途中で打ち切ったのだ（未処理 {rest} 枚）:\n{fatal}")
             messagebox.showwarning("一括検出", "\n".join(lines))
+        elif rest:
+            lines.append(f"\n中止したのだ（未処理 {rest} 枚。もう一度押すと、まだ塗っていない画像に0件だった分も含めてかけ直す）")
+            messagebox.showinfo("一括検出", "\n".join(lines))
         else:
             messagebox.showinfo("一括検出", "\n".join(lines))
 
@@ -1165,8 +1237,7 @@ class MosaicApp:
             try:
                 im = Image.open(os.path.join(OUTPUT_DIR, name))
                 im.draft("RGB", (THUMB_W * 2, THUMB_W * 2))  # JPEG は間引いて読む
-                im = im.convert("RGB")
-                im.thumbnail((THUMB_W, THUMB_W - 12), Image.BILINEAR)
+                im = _make_thumb(im)
             except (OSError, ValueError):
                 continue
             self._thumb_queue.put((i, im))
