@@ -9,12 +9,17 @@ import os
 import json
 import queue
 import shutil
+import sys
 import threading
 
 import detector
 
 INPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "input")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+# フォルダを渡して起動したときは、そのフォルダが input、その中の OUT_SUBDIR が output になる（main で差し替える）
+OUT_SUBDIR = "修正後"
+FOLDER_MODE = False
+ONLY_NAMES = None       # フォルダに続けてファイル名を渡したときだけ、その名前に絞る
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 MOSAIC_BLOCK_RATIO = 100
@@ -468,10 +473,14 @@ class MosaicApp:
         JPEG が再エンコードされて、一度も編集していない画像まで劣化するため。
         """
         os.makedirs(OUTPUT_DIR, exist_ok=True)
+        # 起動前から output にあった画像（前回の作業や、別のツールで加工した結果）
+        existed = {f for f in os.listdir(OUTPUT_DIR) if f.lower().endswith(IMAGE_EXTS)}
 
         if os.path.isdir(INPUT_DIR):
             for name in sorted(os.listdir(INPUT_DIR)):
                 if not name.lower().endswith(IMAGE_EXTS):
+                    continue
+                if ONLY_NAMES is not None and name not in ONLY_NAMES:
                     continue
                 dst = os.path.join(OUTPUT_DIR, name)
                 if os.path.exists(dst):
@@ -482,12 +491,17 @@ class MosaicApp:
                     self.copy_errors.append(f"{name}: {e.strerror or e}")
 
         names = sorted(f for f in os.listdir(OUTPUT_DIR)
-                       if f.lower().endswith(IMAGE_EXTS))
+                       if f.lower().endswith(IMAGE_EXTS)
+                       and (ONLY_NAMES is None or f in ONLY_NAMES))
         # 元画像は input にあればそちら。無ければ output のファイル自体が元になる
         # （過去のセッションで焼き込んだモザイクは剥がせない）
         self.entries = []
         for name in names:
             src = os.path.join(INPUT_DIR, name)
+            if FOLDER_MODE and name in existed:
+                # フォルダ指定のときは、既にある出力を土台にしてその上に塗り足す。
+                # 原本から作り直すと、別のツールで加工した結果が最初の一筆で消えるため
+                src = os.path.join(OUTPUT_DIR, name)
             self.entries.append(
                 (name, src if os.path.exists(src) else os.path.join(OUTPUT_DIR, name))
             )
@@ -1311,6 +1325,18 @@ class MosaicApp:
 
 
 def main():
+    # app.py [フォルダ [ファイル名 ...]]
+    # フォルダの画像を開き、フォルダ内の OUT_SUBDIR へ同名で保存する。原本のフォルダは書き換えない
+    global INPUT_DIR, OUTPUT_DIR, FOLDER_MODE, ONLY_NAMES
+    args = sys.argv[1:]
+    if args:
+        if not os.path.isdir(args[0]):
+            print(f"フォルダが見つからない: {args[0]}", file=sys.stderr)
+            sys.exit(1)
+        INPUT_DIR = os.path.abspath(args[0])
+        OUTPUT_DIR = os.path.join(INPUT_DIR, OUT_SUBDIR)
+        FOLDER_MODE = True
+        ONLY_NAMES = set(args[1:]) or None
     root = tk.Tk()
     app = MosaicApp(root)
     root.mainloop()
